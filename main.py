@@ -1,4 +1,3 @@
-
 import asyncio
 import csv
 import logging
@@ -42,7 +41,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Укажите BOT_TOKEN в .env")
 
-# Только один админ
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "6954213997"))
 DATABASE_PATH = os.getenv("DATABASE_PATH", "fitdaily.db")
 
@@ -333,6 +331,7 @@ def init_db():
             """
         )
 
+        # Миграция: добавляем недостающие колонки если их нет
         columns = [row["name"] for row in conn.execute("PRAGMA table_info(orders)").fetchall()]
         add_columns = {
             "delivery_time": "ALTER TABLE orders ADD COLUMN delivery_time TEXT",
@@ -377,7 +376,7 @@ def save_order_to_db(order_data: Dict[str, Any], telegram_user) -> None:
                 order_data["phone"],
                 order_data["address"],
                 order_data["delivery_date"],
-                order_data["delivery_time"],
+                order_data.get("delivery_time", ""),
                 order_data["program_key"],
                 order_data["program_title"],
                 order_data["days"],
@@ -388,7 +387,7 @@ def save_order_to_db(order_data: Dict[str, Any], telegram_user) -> None:
                 order_data.get("promo_code"),
                 order_data.get("payment_method"),
                 order_data.get("payment_status", "Не требуется"),
-                order_data["comment"],
+                order_data.get("comment", ""),
                 order_data.get("status", "Новая"),
             ),
         )
@@ -587,19 +586,21 @@ def add_review(order_id: str, telegram_user_id: int, full_name: str, rating: int
 # ======================================
 # KEYBOARDS
 # ======================================
-def main_menu_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🛒 Оформить заказ"), KeyboardButton(text="🔁 Повторить заказ")],
-            [KeyboardButton(text="🥗 Программы питания"), KeyboardButton(text="🍽 Актуальное меню")],
-            [KeyboardButton(text="⛔ Стоп-лист"), KeyboardButton(text="🎁 Промокоды")],
-            [KeyboardButton(text="💸 Цены"), KeyboardButton(text="🚚 Доставка")],
-            [KeyboardButton(text="❓ Вопросы"), KeyboardButton(text="⭐ Оставить отзыв")],
-            [KeyboardButton(text="ℹ️ О нас"), KeyboardButton(text="💬 Менеджер")],
-            [KeyboardButton(text="👑 Админ панель")],
-        ],
-        resize_keyboard=True,
-    )
+def main_menu_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
+    """
+    FIX: Кнопка «Админ панель» показывается только администратору.
+    """
+    rows = [
+        [KeyboardButton(text="🛒 Оформить заказ"), KeyboardButton(text="🔁 Повторить заказ")],
+        [KeyboardButton(text="🥗 Программы питания"), KeyboardButton(text="🍽 Актуальное меню")],
+        [KeyboardButton(text="⛔ Стоп-лист"), KeyboardButton(text="🎁 Промокоды")],
+        [KeyboardButton(text="💸 Цены"), KeyboardButton(text="🚚 Доставка")],
+        [KeyboardButton(text="❓ Вопросы"), KeyboardButton(text="⭐ Оставить отзыв")],
+        [KeyboardButton(text="ℹ️ О нас"), KeyboardButton(text="💬 Менеджер")],
+    ]
+    if is_admin:
+        rows.append([KeyboardButton(text="👑 Админ панель")])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 def programs_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -686,11 +687,11 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🗓 Завтра доставки", callback_data="admin:deliveries_tomorrow"),
             ],
             [
-                InlineKeyboardButton(text="📌 Ожидает оплату", callback_data="admin:status:Ожидает оплату"),
-                InlineKeyboardButton(text="🍳 Готовится", callback_data="admin:status:Готовится"),
+                InlineKeyboardButton(text="📌 Ожидает оплату", callback_data="admin:status_filter:Ожидает оплату"),
+                InlineKeyboardButton(text="🍳 Готовится", callback_data="admin:status_filter:Готовится"),
             ],
             [
-                InlineKeyboardButton(text="🚚 В доставке", callback_data="admin:status:Передана в доставку"),
+                InlineKeyboardButton(text="🚚 В доставке", callback_data="admin:status_filter:Передана в доставку"),
                 InlineKeyboardButton(text="⭐ Отзывы", callback_data="admin:reviews"),
             ],
             [
@@ -703,16 +704,16 @@ def admin_status_keyboard(order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="💰 Ожидает оплату", callback_data=f"status:{order_id}:Ожидает оплату"),
-                InlineKeyboardButton(text="✅ Подтверждена", callback_data=f"status:{order_id}:Подтверждена"),
+                InlineKeyboardButton(text="💰 Ожидает оплату", callback_data=f"setstatus:{order_id}:Ожидает оплату"),
+                InlineKeyboardButton(text="✅ Подтверждена", callback_data=f"setstatus:{order_id}:Подтверждена"),
             ],
             [
-                InlineKeyboardButton(text="👨‍🍳 Готовится", callback_data=f"status:{order_id}:Готовится"),
-                InlineKeyboardButton(text="🚚 В доставке", callback_data=f"status:{order_id}:Передана в доставку"),
+                InlineKeyboardButton(text="👨‍🍳 Готовится", callback_data=f"setstatus:{order_id}:Готовится"),
+                InlineKeyboardButton(text="🚚 В доставке", callback_data=f"setstatus:{order_id}:Передана в доставку"),
             ],
             [
-                InlineKeyboardButton(text="🎉 Доставлена", callback_data=f"status:{order_id}:Доставлена"),
-                InlineKeyboardButton(text="❌ Отменена", callback_data=f"status:{order_id}:Отменена"),
+                InlineKeyboardButton(text="🎉 Доставлена", callback_data=f"setstatus:{order_id}:Доставлена"),
+                InlineKeyboardButton(text="❌ Отменена", callback_data=f"setstatus:{order_id}:Отменена"),
             ],
         ]
     )
@@ -731,6 +732,9 @@ def review_rating_keyboard(order_id: str) -> InlineKeyboardMarkup:
 # ======================================
 # HELPERS
 # ======================================
+def admin_only(user_id: int) -> bool:
+    return user_id == ADMIN_TELEGRAM_ID
+
 def format_currency(value: int) -> str:
     return f"{value:,} ₸".replace(",", " ")
 
@@ -830,8 +834,8 @@ def build_order_summary(data: Dict[str, Any]) -> str:
         f"📞 Телефон: {data['phone']}\n"
         f"📍 Адрес: {data['address']}\n"
         f"🗓 Дата доставки: {data['delivery_date']}\n"
-        f"⏰ Время доставки: {data['delivery_time']}\n"
-        f"📝 Комментарий: {data['comment']}"
+        f"⏰ Время доставки: {data.get('delivery_time', '—')}\n"
+        f"📝 Комментарий: {data.get('comment', '—')}"
     )
 
 def build_admin_order_text(data: Dict[str, Any], user) -> str:
@@ -846,14 +850,14 @@ def build_admin_order_text(data: Dict[str, Any], user) -> str:
         f"📞 Телефон: {data['phone']}\n"
         f"📍 Адрес: {data['address']}\n"
         f"🗓 Дата: {data['delivery_date']}\n"
-        f"⏰ Время: {data['delivery_time']}\n"
+        f"⏰ Время: {data.get('delivery_time', '—')}\n"
         f"🥗 Программа: {data['program_title']}\n"
         f"📆 Срок: {data['days']} дн.\n"
         f"🎁 Промокод: {data.get('promo_code') or 'нет'}\n"
         f"💰 Цена до скидки: {format_currency(data['price_per_day'] * data['days'])}\n"
         f"📉 Скидка: {format_currency(data.get('discount_amount', 0))}\n"
         f"💳 Итого: {format_currency(data['total_price'])}\n"
-        f"📝 Комментарий: {data['comment']}\n\n"
+        f"📝 Комментарий: {data.get('comment', '—')}\n\n"
         f"Telegram ID: <code>{user.id}</code>\n"
         f"Username: {username}\n\n"
         "Выберите статус ниже:"
@@ -970,9 +974,6 @@ def build_segments_text() -> str:
         f"😴 Спящие: <b>{stats['Спящий']}</b>"
     )
 
-def admin_only(user_id: int) -> bool:
-    return user_id == ADMIN_TELEGRAM_ID
-
 async def notify_user_about_status(bot: Bot, order: sqlite3.Row, new_status: str):
     try:
         text = (
@@ -1020,11 +1021,12 @@ def export_clients_to_csv(path: str):
 # ======================================
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
+    is_admin = admin_only(message.from_user.id)
     text = (
         f"Здравствуйте! Добро пожаловать в <b>{BRAND_NAME}</b> 🥗\n\n"
         "Здесь можно оформить заказ, посмотреть меню, стоп-лист, промокоды и выбрать способ оплаты."
     )
-    await message.answer(text, reply_markup=main_menu_keyboard())
+    await message.answer(text, reply_markup=main_menu_keyboard(is_admin=is_admin))
 
 async def programs_handler(message: Message):
     await message.answer(
@@ -1073,14 +1075,15 @@ async def repeat_order_handler(message: Message, state: FSMContext):
         return
 
     await state.clear()
+    # FIX: order_id не переносится из старого заказа — генерируем новый
     await state.update_data(
         program_key=last_order["program_key"],
         program_title=last_order["program_title"],
         price_per_day=last_order["price_per_day"],
         days=last_order["days"],
         promo_code=last_order["promo_code"],
-        discount_percent=last_order["discount_percent"],
-        discount_amount=last_order["discount_amount"],
+        discount_percent=last_order["discount_percent"] or 0,
+        discount_amount=last_order["discount_amount"] or 0,
         total_price=last_order["total_price"],
         name=last_order["full_name"],
         phone=last_order["phone"],
@@ -1110,6 +1113,7 @@ async def order_start_handler(message: Message, state: FSMContext):
     )
 
 async def program_view_handler(callback: CallbackQuery):
+    """Просмотр программы без изменения состояния FSM."""
     program_key = callback.data.split(":", 1)[1]
     program = PROGRAMS.get(program_key)
     if not program:
@@ -1140,10 +1144,23 @@ async def programs_back_handler(callback: CallbackQuery):
     await callback.answer()
 
 async def choose_program_handler(callback: CallbackQuery, state: FSMContext):
+    """
+    FIX: Если пользователь нажал «Выбрать программу» вне контекста заказа
+    (FSM не в состоянии choosing_program) — мягко запускаем оформление заказа.
+    """
     program_key = callback.data.split(":", 1)[1]
     program = PROGRAMS.get(program_key)
     if not program:
         await callback.answer("Программа не найдена", show_alert=True)
+        return
+
+    current_state = await state.get_state()
+    # Принимаем выбор программы если мы в нужном состоянии или FSM вообще не запущен
+    if current_state not in (OrderForm.choosing_program.state, None):
+        await callback.answer(
+            "Сначала нажмите «🛒 Оформить заказ» для начала оформления.",
+            show_alert=True,
+        )
         return
 
     await state.update_data(
@@ -1164,7 +1181,11 @@ async def choose_program_handler(callback: CallbackQuery, state: FSMContext):
 
 async def choose_duration_handler(callback: CallbackQuery, state: FSMContext):
     duration_key = callback.data.split(":", 1)[1]
-    days = DURATIONS[duration_key]
+    days = DURATIONS.get(duration_key)
+    if days is None:
+        await callback.answer("Неверный выбор", show_alert=True)
+        return
+
     data = await state.get_data()
     total_price = data["price_per_day"] * days
 
@@ -1190,11 +1211,18 @@ async def promo_callback_handler(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 async def promo_text_handler(message: Message, state: FSMContext):
-    code = message.text.strip().upper()
+    text = message.text.strip()
+    # Позволяем написать "пропустить" текстом
+    if text.lower() == "пропустить":
+        await state.set_state(OrderForm.entering_name)
+        await message.answer("Промокод пропущен.\n\nВведите ваше имя:")
+        return
+
+    code = text.upper()
     data = await state.get_data()
     promo = get_promo(code)
     if not promo:
-        await message.answer("Промокод не найден или неактивен. Введите другой или напишите Пропустить.")
+        await message.answer("Промокод не найден или неактивен. Введите другой или напишите «Пропустить».")
         return
 
     base_total = data["price_per_day"] * data["days"]
@@ -1218,7 +1246,7 @@ async def promo_text_handler(message: Message, state: FSMContext):
 async def name_handler(message: Message, state: FSMContext):
     name = message.text.strip()
     if len(name) < 2:
-        await message.answer("Введите корректное имя.")
+        await message.answer("Введите корректное имя (минимум 2 символа).")
         return
     await state.update_data(name=name)
     await state.set_state(OrderForm.entering_phone)
@@ -1275,6 +1303,7 @@ async def comment_handler(message: Message, state: FSMContext):
 
 async def payment_handler(callback: CallbackQuery, state: FSMContext):
     payment_method = callback.data.split(":", 1)[1]
+    # FIX: генерируем order_id здесь гарантированно
     order_id = generate_order_id(callback.from_user.id)
 
     payment_status = "Не требуется"
@@ -1307,22 +1336,47 @@ async def payment_handler(callback: CallbackQuery, state: FSMContext):
 
 async def confirm_handler(callback: CallbackQuery, state: FSMContext, bot: Bot):
     action = callback.data.split(":", 1)[1]
+    is_admin = admin_only(callback.from_user.id)
 
     if action == "cancel":
         await state.clear()
         await callback.message.edit_text("Заказ отменён.")
-        await bot.send_message(callback.from_user.id, "Вы вернулись в главное меню.", reply_markup=main_menu_keyboard())
+        await bot.send_message(
+            callback.from_user.id,
+            "Вы вернулись в главное меню.",
+            reply_markup=main_menu_keyboard(is_admin=is_admin),
+        )
         await callback.answer()
         return
 
     if action == "restart":
         await state.clear()
         await state.set_state(OrderForm.choosing_program)
-        await callback.message.edit_text("Заполним заявку заново. Выберите программу питания:", reply_markup=programs_keyboard())
+        await callback.message.edit_text(
+            "Заполним заявку заново. Выберите программу питания:",
+            reply_markup=programs_keyboard(),
+        )
         await callback.answer()
         return
 
+    # action == "yes"
     data = await state.get_data()
+
+    # Проверка что все обязательные поля присутствуют
+    required_fields = ["order_id", "program_key", "program_title", "price_per_day",
+                       "days", "total_price", "name", "phone", "address",
+                       "delivery_date", "payment_method"]
+    missing = [f for f in required_fields if not data.get(f)]
+    if missing:
+        logger.error("Отсутствуют поля при подтверждении заказа: %s", missing)
+        await callback.answer("Ошибка данных заказа. Пожалуйста, начните заново.", show_alert=True)
+        await state.clear()
+        await bot.send_message(
+            callback.from_user.id,
+            "Произошла ошибка. Пожалуйста, оформите заказ заново.",
+            reply_markup=main_menu_keyboard(is_admin=is_admin),
+        )
+        return
 
     db_status = "✅ Заявка и клиент сохранены в базе данных."
     try:
@@ -1354,13 +1408,25 @@ async def confirm_handler(callback: CallbackQuery, state: FSMContext, bot: Bot):
         f"Статус оплаты: <b>{data.get('payment_status', '—')}</b>\n\n"
         f"{admin_status}\n{db_status}"
     )
-    await bot.send_message(callback.from_user.id, "Для быстрой связи можете сразу написать менеджеру:", reply_markup=manager_kb)
-    await bot.send_message(callback.from_user.id, "Главное меню открыто снова.", reply_markup=main_menu_keyboard())
+    await bot.send_message(
+        callback.from_user.id,
+        "Для быстрой связи можете сразу написать менеджеру:",
+        reply_markup=manager_kb,
+    )
+    await bot.send_message(
+        callback.from_user.id,
+        "Главное меню открыто снова.",
+        reply_markup=main_menu_keyboard(is_admin=is_admin),
+    )
     await state.clear()
     await callback.answer()
 
 async def review_callback_handler(callback: CallbackQuery, state: FSMContext):
-    _, order_id, rating = callback.data.split(":")
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("Ошибка данных отзыва", show_alert=True)
+        return
+    _, order_id, rating = parts
     await state.set_state(ReviewForm.entering_review)
     await state.update_data(review_order_id=order_id, review_rating=int(rating))
     await callback.message.edit_text(
@@ -1375,9 +1441,17 @@ async def review_text_handler(message: Message, state: FSMContext, bot: Bot):
     review_text = message.text.strip()
     order = get_order_by_order_id(order_id) if order_id else None
     full_name = order["full_name"] if order else (message.from_user.full_name or "Клиент")
-    add_review(order_id, message.from_user.id, full_name, rating, review_text if review_text.lower() != "нет" else "")
 
-    await message.answer("Спасибо за отзыв! 💚", reply_markup=main_menu_keyboard())
+    is_admin = admin_only(message.from_user.id)
+    add_review(
+        order_id,
+        message.from_user.id,
+        full_name,
+        rating,
+        review_text if review_text.lower() != "нет" else "",
+    )
+
+    await message.answer("Спасибо за отзыв! 💚", reply_markup=main_menu_keyboard(is_admin=is_admin))
     try:
         await bot.send_message(
             ADMIN_TELEGRAM_ID,
@@ -1391,8 +1465,9 @@ async def review_text_handler(message: Message, state: FSMContext, bot: Bot):
 # ADMIN HANDLERS
 # ======================================
 async def admin_panel_handler(message: Message):
+    # FIX: жёсткая проверка — только один конкретный администратор
     if not admin_only(message.from_user.id):
-        await message.answer("У вас нет доступа к админ панели.")
+        await message.answer("У вас нет доступа к этому разделу.")
         return
     await message.answer(
         "<b>👑 Админ панель FitDaily</b>\n\nВыберите нужное действие ниже:",
@@ -1564,7 +1639,7 @@ async def order_detail_handler(message: Message):
         f"📝 Комментарий: {order['comment']}\n"
         f"🕒 Создан: {order['created_at']}"
     )
-    await message.answer(text, reply_markup=admin_status_keyboard(order['order_id']))
+    await message.answer(text, reply_markup=admin_status_keyboard(order["order_id"]))
 
 async def set_status_handler(message: Message, bot: Bot):
     if not admin_only(message.from_user.id):
@@ -1579,7 +1654,7 @@ async def set_status_handler(message: Message, bot: Bot):
     new_status = parts[2].strip()
 
     if new_status not in STATUSES:
-        await message.answer("Недопустимый статус.")
+        await message.answer(f"Недопустимый статус. Допустимые: {', '.join(STATUSES)}")
         return
 
     updated = update_order_status(order_id, new_status)
@@ -1598,32 +1673,42 @@ async def admin_callback_handler(callback: CallbackQuery):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
-    parts = callback.data.split(":")
-    if len(parts) >= 3 and parts[1] == "status":
-        status = ":".join(parts[2:])
+    # FIX: переименован callback с "admin:status:..." на "admin:status_filter:..."
+    # чтобы не конфликтовать с "setstatus:" обработчиком
+    data = callback.data  # например "admin:today" или "admin:status_filter:Готовится"
+    parts = data.split(":", 2)
+    action = parts[1] if len(parts) > 1 else ""
+
+    if action == "status_filter":
+        status = parts[2] if len(parts) > 2 else ""
         await callback.message.edit_text(
             build_orders_text(f"📌 Заказы со статусом: {status}", get_orders_by_status(status, 20)),
             reply_markup=admin_main_keyboard(),
         )
-        await callback.answer()
-        return
 
-    action = parts[1]
-
-    if action == "today":
+    elif action == "today":
         start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1)
         orders = get_orders_between(start, end)
-        await callback.message.edit_text(build_stats_text("📊 Статистика за сегодня", orders), reply_markup=admin_main_keyboard())
+        await callback.message.edit_text(
+            build_stats_text("📊 Статистика за сегодня", orders),
+            reply_markup=admin_main_keyboard(),
+        )
 
     elif action == "week":
         end = datetime.now() + timedelta(seconds=1)
         start = datetime.now() - timedelta(days=7)
         orders = get_orders_between(start, end)
-        await callback.message.edit_text(build_stats_text("📅 Статистика за 7 дней", orders), reply_markup=admin_main_keyboard())
+        await callback.message.edit_text(
+            build_stats_text("📅 Статистика за 7 дней", orders),
+            reply_markup=admin_main_keyboard(),
+        )
 
     elif action == "recent":
-        await callback.message.edit_text(build_orders_text("🧾 Последние заказы", get_recent_orders(10)), reply_markup=admin_main_keyboard())
+        await callback.message.edit_text(
+            build_orders_text("🧾 Последние заказы", get_recent_orders(10)),
+            reply_markup=admin_main_keyboard(),
+        )
 
     elif action == "clients":
         clients = get_recent_clients(20)
@@ -1634,26 +1719,51 @@ async def admin_callback_handler(callback: CallbackQuery):
 
     elif action == "deliveries_today":
         date_text = datetime.now().strftime("%d.%m.%Y")
-        await callback.message.edit_text(build_orders_text(f"🚚 Доставки на {date_text}", get_orders_by_delivery_date(date_text)), reply_markup=admin_main_keyboard())
+        await callback.message.edit_text(
+            build_orders_text(f"🚚 Доставки на {date_text}", get_orders_by_delivery_date(date_text)),
+            reply_markup=admin_main_keyboard(),
+        )
 
     elif action == "deliveries_tomorrow":
         date_text = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
-        await callback.message.edit_text(build_orders_text(f"🗓 Доставки на {date_text}", get_orders_by_delivery_date(date_text)), reply_markup=admin_main_keyboard())
+        await callback.message.edit_text(
+            build_orders_text(f"🗓 Доставки на {date_text}", get_orders_by_delivery_date(date_text)),
+            reply_markup=admin_main_keyboard(),
+        )
 
     elif action == "reviews":
-        await callback.message.edit_text(build_reviews_text(get_reviews(20)), reply_markup=admin_main_keyboard())
+        await callback.message.edit_text(
+            build_reviews_text(get_reviews(20)),
+            reply_markup=admin_main_keyboard(),
+        )
 
     elif action == "segments":
-        await callback.message.edit_text(build_segments_text(), reply_markup=admin_main_keyboard())
+        await callback.message.edit_text(
+            build_segments_text(),
+            reply_markup=admin_main_keyboard(),
+        )
 
     await callback.answer()
 
-async def status_callback_handler(callback: CallbackQuery, bot: Bot):
+async def setstatus_callback_handler(callback: CallbackQuery, bot: Bot):
+    """
+    FIX: Переименован с 'status:' на 'setstatus:' чтобы не конфликтовать
+    с admin:status_filter: обработчиком.
+    """
     if not admin_only(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
-    _, order_id, new_status = callback.data.split(":", 2)
+    # Формат: setstatus:{order_id}:{new_status}
+    # order_id может содержать '-', статус может содержать пробелы
+    parts = callback.data.split(":", 2)
+    if len(parts) < 3:
+        await callback.answer("Некорректный формат", show_alert=True)
+        return
+
+    order_id = parts[1]
+    new_status = parts[2]
+
     if new_status not in STATUSES:
         await callback.answer("Некорректный статус", show_alert=True)
         return
@@ -1689,13 +1799,21 @@ async def status_callback_handler(callback: CallbackQuery, bot: Bot):
 # ======================================
 async def fallback_handler(message: Message, state: FSMContext):
     current_state = await state.get_state()
+
+    # FIX: в состоянии промокода разрешаем «пропустить» текстом
     if current_state == OrderForm.entering_promo.state and message.text.strip().lower() == "пропустить":
         await state.set_state(OrderForm.entering_name)
         await message.answer("Промокод пропущен.\n\nВведите ваше имя:")
         return
 
+    # Если нет активного FSM — показываем подсказку
     if current_state is None:
-        await message.answer("Я не понял сообщение. Выберите нужный раздел через меню ниже.", reply_markup=main_menu_keyboard())
+        await message.answer(
+            "Я не понял сообщение. Выберите нужный раздел через меню ниже.",
+            reply_markup=main_menu_keyboard(is_admin=admin_only(message.from_user.id)),
+        )
+    # Если FSM активен, но сообщение не ожидается — молча игнорируем
+    # (не сбиваем состояние пользователя случайным сообщением)
 
 # ======================================
 # MAIN
@@ -1709,7 +1827,7 @@ async def main():
     )
     dp = Dispatcher(storage=MemoryStorage())
 
-    # User
+    # ── User message handlers ──────────────────────────────────────────────
     dp.message.register(start_handler, CommandStart())
     dp.message.register(order_start_handler, F.text == "🛒 Оформить заказ")
     dp.message.register(repeat_order_handler, F.text == "🔁 Повторить заказ")
@@ -1725,7 +1843,7 @@ async def main():
     dp.message.register(manager_handler, F.text == "💬 Менеджер")
     dp.message.register(admin_panel_handler, F.text == "👑 Админ панель")
 
-    # Callbacks
+    # ── Callback query handlers ────────────────────────────────────────────
     dp.callback_query.register(program_view_handler, F.data.startswith("program_view:"))
     dp.callback_query.register(programs_back_handler, F.data == "programs:back")
     dp.callback_query.register(choose_program_handler, F.data.startswith("program_select:"))
@@ -1735,10 +1853,11 @@ async def main():
     dp.callback_query.register(payment_handler, OrderForm.choosing_payment, F.data.startswith("payment:"))
     dp.callback_query.register(confirm_handler, OrderForm.confirming_order, F.data.startswith("confirm:"))
     dp.callback_query.register(admin_callback_handler, F.data.startswith("admin:"))
-    dp.callback_query.register(status_callback_handler, F.data.startswith("status:"))
+    # FIX: используем "setstatus:" вместо "status:" во избежание конфликтов
+    dp.callback_query.register(setstatus_callback_handler, F.data.startswith("setstatus:"))
     dp.callback_query.register(review_callback_handler, F.data.startswith("review:"))
 
-    # FSM messages
+    # ── FSM message handlers ───────────────────────────────────────────────
     dp.message.register(promo_text_handler, OrderForm.entering_promo)
     dp.message.register(name_handler, OrderForm.entering_name)
     dp.message.register(phone_handler, OrderForm.entering_phone)
@@ -1747,7 +1866,7 @@ async def main():
     dp.message.register(comment_handler, OrderForm.entering_comment)
     dp.message.register(review_text_handler, ReviewForm.entering_review)
 
-    # Admin commands
+    # ── Admin commands ─────────────────────────────────────────────────────
     dp.message.register(admin_help_handler, Command("help_admin"))
     dp.message.register(orders_today_handler, Command("orders_today"))
     dp.message.register(orders_week_handler, Command("orders_week"))
@@ -1764,9 +1883,10 @@ async def main():
     dp.message.register(order_detail_handler, Command("order"))
     dp.message.register(set_status_handler, Command("set_status"))
 
+    # ── Fallback (должен быть последним) ──────────────────────────────────
     dp.message.register(fallback_handler)
 
-    logger.info("Bot started")
+    logger.info("Bot started. Admin ID: %d", ADMIN_TELEGRAM_ID)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
