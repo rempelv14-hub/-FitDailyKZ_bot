@@ -6,6 +6,7 @@ import re
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
+from html import escape
 from typing import Dict, Any, Optional, List, Tuple
 
 from aiogram import Bot, Dispatcher, F
@@ -49,13 +50,13 @@ MANAGER_WHATSAPP = "https://wa.me/77712841932"
 MANAGER_CONTACT_TEXT = "Менеджер FitDaily"
 
 DELIVERY_TIME_SLOTS = [
-    "06:00–08:00",
-    "08:00–10:00",
-    "10:00–12:00",
-    "12:00–14:00",
-    "14:00–16:00",
-    "16:00–18:00",
-    "18:00–20:00",
+    "06:00-08:00",
+    "08:00-10:00",
+    "10:00-12:00",
+    "12:00-14:00",
+    "14:00-16:00",
+    "16:00-18:00",
+    "18:00-20:00",
 ]
 
 ABOUT_TEXT = (
@@ -82,7 +83,7 @@ PROGRAMS = {
         "title": "🥬 Slim Start",
         "description": "Лёгкая программа для снижения калорийности.",
         "price_per_day": 6500,
-        "calories": "1200–1400 ккал",
+        "calories": "1200-1400 ккал",
         "goal": "Снижение веса и лёгкость каждый день",
         "includes": [
             "5 приёмов пищи",
@@ -102,7 +103,7 @@ PROGRAMS = {
         "title": "⚖️ Balance Daily",
         "description": "Универсальный рацион на каждый день.",
         "price_per_day": 7200,
-        "calories": "1500–1800 ккал",
+        "calories": "1500-1800 ккал",
         "goal": "Поддержание формы и энергии",
         "includes": [
             "5 полноценных приёмов пищи",
@@ -122,7 +123,7 @@ PROGRAMS = {
         "title": "💪 Protein Power",
         "description": "Белковая программа для активных людей.",
         "price_per_day": 7900,
-        "calories": "1700–2200 ккал",
+        "calories": "1700-2200 ккал",
         "goal": "Спорт, сытость и восстановление",
         "includes": [
             "Повышенный белок",
@@ -142,10 +143,10 @@ PROGRAMS = {
         "title": "🍏 Detox Light",
         "description": "Лёгкая программа для разгрузочных дней.",
         "price_per_day": 5900,
-        "calories": "1000–1200 ккал",
+        "calories": "1000-1200 ккал",
         "goal": "Лёгкость и аккуратная разгрузка",
         "includes": [
-            "4–5 лёгких приёмов пищи",
+            "4-5 лёгких приёмов пищи",
             "Смузи, супы и боулы",
             "Сниженная калорийность",
             "Больше зелени и овощей",
@@ -195,7 +196,30 @@ PROMO_CODES = {
 }
 
 DURATIONS = {"1": 1, "5": 5, "7": 7, "14": 14, "30": 30}
-STATUSES = ["Новая", "Ожидает оплату", "Подтверждена", "Готовится", "Передана в доставку", "Доставлена", "Отменена"]
+STATUSES = [
+    "Новая",
+    "Ожидает оплату",
+    "Подтверждена",
+    "Готовится",
+    "Передана в доставку",
+    "Доставлена",
+    "Отменена",
+]
+
+# Коды статусов для callback_data (короткие, без пробелов и кириллицы)
+# FIX: callback_data не может превышать 64 байта — используем короткие коды
+STATUS_CODES = {
+    "s0": "Новая",
+    "s1": "Ожидает оплату",
+    "s2": "Подтверждена",
+    "s3": "Готовится",
+    "s4": "Передана в доставку",
+    "s5": "Доставлена",
+    "s6": "Отменена",
+}
+STATUS_TO_CODE = {v: k for k, v in STATUS_CODES.items()}
+
+MAX_DELIVERY_DAYS_AHEAD = 365  # максимум дней вперёд для даты доставки
 
 # ======================================
 # LOGGING
@@ -205,6 +229,15 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+# ======================================
+# HELPERS — HTML-безопасность
+# ======================================
+def h(value: Any) -> str:
+    """Экранирует строку для безопасной вставки в HTML-сообщение Telegram."""
+    return escape(str(value or ""))
+
 
 # ======================================
 # FSM STATES
@@ -222,8 +255,10 @@ class OrderForm(StatesGroup):
     choosing_payment = State()
     confirming_order = State()
 
+
 class ReviewForm(StatesGroup):
     entering_review = State()
+
 
 # ======================================
 # DATABASE
@@ -232,6 +267,7 @@ def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def init_db():
     with closing(get_connection()) as conn:
@@ -356,6 +392,7 @@ def init_db():
 
         conn.commit()
 
+
 def save_order_to_db(order_data: Dict[str, Any], telegram_user) -> None:
     with closing(get_connection()) as conn:
         conn.execute(
@@ -393,25 +430,39 @@ def save_order_to_db(order_data: Dict[str, Any], telegram_user) -> None:
         )
         conn.commit()
 
+
 def get_favorite_program_for_user(user_id: int, fallback: Optional[str] = None) -> Optional[str]:
+    """
+    FIX: Вызывается ПОСЛЕ save_order_to_db, поэтому новый заказ уже
+    учитывается при расчёте любимой программы.
+    """
     with closing(get_connection()) as conn:
         rows = conn.execute(
-            "SELECT program_title, COUNT(*) as cnt FROM orders WHERE telegram_user_id = ? GROUP BY program_title ORDER BY cnt DESC",
+            """
+            SELECT program_title, COUNT(*) as cnt
+            FROM orders
+            WHERE telegram_user_id = ?
+            GROUP BY program_title
+            ORDER BY cnt DESC
+            """,
             (user_id,),
         ).fetchall()
         if rows:
             return rows[0]["program_title"]
         return fallback
 
+
 def upsert_client(order_data: Dict[str, Any], telegram_user) -> None:
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # FIX: favorite_program определяется уже после сохранения заказа
+    favorite_program = get_favorite_program_for_user(
+        telegram_user.id, fallback=order_data["program_title"]
+    )
     with closing(get_connection()) as conn:
         existing = conn.execute(
-            "SELECT * FROM clients WHERE telegram_user_id = ?",
+            "SELECT id FROM clients WHERE telegram_user_id = ?",
             (telegram_user.id,),
         ).fetchone()
-
-        favorite_program = get_favorite_program_for_user(telegram_user.id, fallback=order_data["program_title"])
 
         if existing:
             conn.execute(
@@ -446,8 +497,9 @@ def upsert_client(order_data: Dict[str, Any], telegram_user) -> None:
             conn.execute(
                 """
                 INSERT INTO clients (
-                    telegram_user_id, telegram_username, full_name, phone, address, favorite_program,
-                    first_order_at, last_order_at, total_orders, total_spent, last_order_id, last_program_title
+                    telegram_user_id, telegram_username, full_name, phone, address,
+                    favorite_program, first_order_at, last_order_at, total_orders,
+                    total_spent, last_order_id, last_program_title
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
@@ -456,7 +508,7 @@ def upsert_client(order_data: Dict[str, Any], telegram_user) -> None:
                     order_data["name"],
                     order_data["phone"],
                     order_data["address"],
-                    order_data["program_title"],
+                    favorite_program,
                     now_str,
                     now_str,
                     1,
@@ -467,6 +519,7 @@ def upsert_client(order_data: Dict[str, Any], telegram_user) -> None:
             )
         conn.commit()
 
+
 def update_order_status(order_id: str, new_status: str) -> bool:
     with closing(get_connection()) as conn:
         cursor = conn.execute(
@@ -476,28 +529,49 @@ def update_order_status(order_id: str, new_status: str) -> bool:
         conn.commit()
         return cursor.rowcount > 0
 
+
 def get_order_by_order_id(order_id: str) -> Optional[sqlite3.Row]:
     with closing(get_connection()) as conn:
-        return conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,)).fetchone()
+        return conn.execute(
+            "SELECT * FROM orders WHERE order_id = ?", (order_id,)
+        ).fetchone()
+
 
 def get_orders_between(start_dt: datetime, end_dt: datetime) -> List[sqlite3.Row]:
     with closing(get_connection()) as conn:
         return conn.execute(
-            "SELECT * FROM orders WHERE created_at >= ? AND created_at < ? ORDER BY created_at DESC",
-            (start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S")),
+            """
+            SELECT * FROM orders
+            WHERE created_at >= ? AND created_at < ?
+            ORDER BY created_at DESC
+            """,
+            (
+                start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            ),
         ).fetchall()
+
 
 def get_recent_orders(limit: int = 10) -> List[sqlite3.Row]:
     with closing(get_connection()) as conn:
-        return conn.execute("SELECT * FROM orders ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return conn.execute(
+            "SELECT * FROM orders ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+
 
 def get_recent_clients(limit: int = 20) -> List[sqlite3.Row]:
     with closing(get_connection()) as conn:
-        return conn.execute("SELECT * FROM clients ORDER BY last_order_at DESC LIMIT ?", (limit,)).fetchall()
+        return conn.execute(
+            "SELECT * FROM clients ORDER BY last_order_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+
 
 def get_reviews(limit: int = 20) -> List[sqlite3.Row]:
     with closing(get_connection()) as conn:
-        return conn.execute("SELECT * FROM reviews ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return conn.execute(
+            "SELECT * FROM reviews ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+
 
 def get_last_order_by_user(user_id: int) -> Optional[sqlite3.Row]:
     with closing(get_connection()) as conn:
@@ -506,6 +580,7 @@ def get_last_order_by_user(user_id: int) -> Optional[sqlite3.Row]:
             (user_id,),
         ).fetchone()
 
+
 def get_orders_by_status(status: str, limit: int = 20) -> List[sqlite3.Row]:
     with closing(get_connection()) as conn:
         return conn.execute(
@@ -513,23 +588,36 @@ def get_orders_by_status(status: str, limit: int = 20) -> List[sqlite3.Row]:
             (status, limit),
         ).fetchall()
 
+
 def get_orders_by_delivery_date(date_text: str) -> List[sqlite3.Row]:
     with closing(get_connection()) as conn:
         return conn.execute(
-            "SELECT * FROM orders WHERE delivery_date = ? ORDER BY delivery_time ASC, created_at DESC",
+            """
+            SELECT * FROM orders
+            WHERE delivery_date = ?
+            ORDER BY delivery_time ASC, created_at DESC
+            """,
             (date_text,),
         ).fetchall()
 
+
 def normalize_phone(phone: str) -> str:
     return re.sub(r"\D", "", phone or "")
+
 
 def get_clients_by_phone(phone: str) -> List[sqlite3.Row]:
     digits = normalize_phone(phone)
     if not digits:
         return []
     with closing(get_connection()) as conn:
-        rows = conn.execute("SELECT * FROM clients ORDER BY last_order_at DESC").fetchall()
-        return [row for row in rows if normalize_phone(row["phone"]).endswith(digits[-10:])]
+        rows = conn.execute(
+            "SELECT * FROM clients ORDER BY last_order_at DESC"
+        ).fetchall()
+        return [
+            row for row in rows
+            if normalize_phone(row["phone"]).endswith(digits[-10:])
+        ]
+
 
 def get_client_notes(phone: str) -> List[sqlite3.Row]:
     with closing(get_connection()) as conn:
@@ -537,6 +625,7 @@ def get_client_notes(phone: str) -> List[sqlite3.Row]:
             "SELECT * FROM client_notes WHERE phone = ? ORDER BY created_at DESC",
             (phone,),
         ).fetchall()
+
 
 def add_client_note(phone: str, note_text: str):
     with closing(get_connection()) as conn:
@@ -546,13 +635,18 @@ def add_client_note(phone: str, note_text: str):
         )
         conn.commit()
 
+
 def add_to_blacklist(phone: str, reason: str):
     with closing(get_connection()) as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO blacklisted_clients (phone, reason, created_at) VALUES (?, ?, ?)",
+            """
+            INSERT OR REPLACE INTO blacklisted_clients (phone, reason, created_at)
+            VALUES (?, ?, ?)
+            """,
             (phone, reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.commit()
+
 
 def is_blacklisted(phone: str) -> Optional[sqlite3.Row]:
     normalized = normalize_phone(phone)
@@ -565,6 +659,7 @@ def is_blacklisted(phone: str) -> Optional[sqlite3.Row]:
                 return row
         return None
 
+
 def get_promo(code: str) -> Optional[sqlite3.Row]:
     with closing(get_connection()) as conn:
         return conn.execute(
@@ -572,24 +667,37 @@ def get_promo(code: str) -> Optional[sqlite3.Row]:
             (code.upper(),),
         ).fetchone()
 
-def add_review(order_id: str, telegram_user_id: int, full_name: str, rating: int, review_text: str):
+
+def add_review(
+    order_id: str,
+    telegram_user_id: int,
+    full_name: str,
+    rating: int,
+    review_text: str,
+):
     with closing(get_connection()) as conn:
         conn.execute(
             """
-            INSERT INTO reviews (order_id, telegram_user_id, full_name, rating, review_text, created_at)
+            INSERT INTO reviews
+                (order_id, telegram_user_id, full_name, rating, review_text, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (order_id, telegram_user_id, full_name, rating, review_text, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            (
+                order_id,
+                telegram_user_id,
+                full_name,
+                rating,
+                review_text,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ),
         )
         conn.commit()
+
 
 # ======================================
 # KEYBOARDS
 # ======================================
 def main_menu_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
-    """
-    FIX: Кнопка «Админ панель» показывается только администратору.
-    """
     rows = [
         [KeyboardButton(text="🛒 Оформить заказ"), KeyboardButton(text="🔁 Повторить заказ")],
         [KeyboardButton(text="🥗 Программы питания"), KeyboardButton(text="🍽 Актуальное меню")],
@@ -601,6 +709,7 @@ def main_menu_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     if is_admin:
         rows.append([KeyboardButton(text="👑 Админ панель")])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
 
 def programs_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -615,6 +724,7 @@ def programs_keyboard() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
 
 def durations_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -631,6 +741,7 @@ def durations_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
+
 def promo_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -639,11 +750,14 @@ def promo_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
+
 def delivery_time_keyboard() -> InlineKeyboardMarkup:
+    # FIX: используем ASCII-тире вместо en-dash, чтобы избежать проблем с кодировкой
     rows = []
     for slot in DELIVERY_TIME_SLOTS:
-        rows.append([InlineKeyboardButton(text=slot, callback_data=f"delivery_time:{slot}")])
+        rows.append([InlineKeyboardButton(text=slot, callback_data=f"dtime:{slot}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def payment_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -654,6 +768,7 @@ def payment_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
+
 def confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -663,13 +778,20 @@ def confirm_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
+
 def program_details_keyboard(program_key: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 Выбрать программу", callback_data=f"program_select:{program_key}")],
+            [
+                InlineKeyboardButton(
+                    text="🛒 Выбрать программу",
+                    callback_data=f"program_select:{program_key}",
+                )
+            ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="programs:back")],
         ]
     )
+
 
 def admin_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -683,15 +805,26 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="👥 Клиенты", callback_data="admin:clients"),
             ],
             [
-                InlineKeyboardButton(text="🚚 Сегодня доставки", callback_data="admin:deliveries_today"),
-                InlineKeyboardButton(text="🗓 Завтра доставки", callback_data="admin:deliveries_tomorrow"),
+                InlineKeyboardButton(
+                    text="🚚 Сегодня доставки", callback_data="admin:del_today"
+                ),
+                InlineKeyboardButton(
+                    text="🗓 Завтра доставки", callback_data="admin:del_tomorrow"
+                ),
             ],
             [
-                InlineKeyboardButton(text="📌 Ожидает оплату", callback_data="admin:status_filter:Ожидает оплату"),
-                InlineKeyboardButton(text="🍳 Готовится", callback_data="admin:status_filter:Готовится"),
+                # FIX: используем короткие коды статусов — callback_data <= 64 байт
+                InlineKeyboardButton(
+                    text="📌 Ожидает оплату", callback_data="admin:sf:s1"
+                ),
+                InlineKeyboardButton(
+                    text="🍳 Готовится", callback_data="admin:sf:s3"
+                ),
             ],
             [
-                InlineKeyboardButton(text="🚚 В доставке", callback_data="admin:status_filter:Передана в доставку"),
+                InlineKeyboardButton(
+                    text="🚚 В доставке", callback_data="admin:sf:s4"
+                ),
                 InlineKeyboardButton(text="⭐ Отзывы", callback_data="admin:reviews"),
             ],
             [
@@ -700,34 +833,47 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
+
 def admin_status_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    """
+    FIX: callback_data = "ss:{order_id}:{status_code}"
+    Максимальная длина: len("ss:") + len(order_id) + len(":s6") = 3 + ~22 + 3 = 28 байт.
+    Гарантированно укладывается в лимит Telegram (64 байта).
+    """
+    def cb(code: str) -> str:
+        return f"ss:{order_id}:{code}"
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="💰 Ожидает оплату", callback_data=f"setstatus:{order_id}:Ожидает оплату"),
-                InlineKeyboardButton(text="✅ Подтверждена", callback_data=f"setstatus:{order_id}:Подтверждена"),
+                InlineKeyboardButton(text="💰 Ожидает оплату", callback_data=cb("s1")),
+                InlineKeyboardButton(text="✅ Подтверждена", callback_data=cb("s2")),
             ],
             [
-                InlineKeyboardButton(text="👨‍🍳 Готовится", callback_data=f"setstatus:{order_id}:Готовится"),
-                InlineKeyboardButton(text="🚚 В доставке", callback_data=f"setstatus:{order_id}:Передана в доставку"),
+                InlineKeyboardButton(text="👨‍🍳 Готовится", callback_data=cb("s3")),
+                InlineKeyboardButton(text="🚚 В доставке", callback_data=cb("s4")),
             ],
             [
-                InlineKeyboardButton(text="🎉 Доставлена", callback_data=f"setstatus:{order_id}:Доставлена"),
-                InlineKeyboardButton(text="❌ Отменена", callback_data=f"setstatus:{order_id}:Отменена"),
+                InlineKeyboardButton(text="🎉 Доставлена", callback_data=cb("s5")),
+                InlineKeyboardButton(text="❌ Отменена", callback_data=cb("s6")),
             ],
         ]
     )
 
+
 def review_rating_keyboard(order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(text="1", callback_data=f"review:{order_id}:1"),
-            InlineKeyboardButton(text="2", callback_data=f"review:{order_id}:2"),
-            InlineKeyboardButton(text="3", callback_data=f"review:{order_id}:3"),
-            InlineKeyboardButton(text="4", callback_data=f"review:{order_id}:4"),
-            InlineKeyboardButton(text="5", callback_data=f"review:{order_id}:5"),
-        ]]
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="1⭐", callback_data=f"rv:{order_id}:1"),
+                InlineKeyboardButton(text="2⭐", callback_data=f"rv:{order_id}:2"),
+                InlineKeyboardButton(text="3⭐", callback_data=f"rv:{order_id}:3"),
+                InlineKeyboardButton(text="4⭐", callback_data=f"rv:{order_id}:4"),
+                InlineKeyboardButton(text="5⭐", callback_data=f"rv:{order_id}:5"),
+            ]
+        ]
     )
+
 
 # ======================================
 # HELPERS
@@ -735,22 +881,33 @@ def review_rating_keyboard(order_id: str) -> InlineKeyboardMarkup:
 def admin_only(user_id: int) -> bool:
     return user_id == ADMIN_TELEGRAM_ID
 
+
 def format_currency(value: int) -> str:
     return f"{value:,} ₸".replace(",", " ")
 
+
 def generate_order_id(user_id: int) -> str:
     return f"FD-{user_id}-{datetime.now().strftime('%d%m%H%M%S')}"
+
 
 def validate_phone(phone: str) -> bool:
     digits = normalize_phone(phone)
     return 10 <= len(digits) <= 15
 
+
 def validate_delivery_date(date_text: str) -> bool:
+    """
+    FIX: проверяем и нижнюю границу (не раньше сегодня),
+    и верхнюю границу (не более MAX_DELIVERY_DAYS_AHEAD дней вперёд).
+    """
     try:
         entered = datetime.strptime(date_text, "%d.%m.%Y")
-        return entered.date() >= datetime.now().date()
+        today = datetime.now().date()
+        max_date = today + timedelta(days=MAX_DELIVERY_DAYS_AHEAD)
+        return today <= entered.date() <= max_date
     except ValueError:
         return False
+
 
 def calculate_discount(total_price: int, promo_code: Optional[str]) -> Tuple[int, int]:
     if not promo_code:
@@ -762,20 +919,30 @@ def calculate_discount(total_price: int, promo_code: Optional[str]) -> Tuple[int
     discount_amount = total_price * discount_percent // 100
     return discount_percent, discount_amount
 
+
 def build_prices_text() -> str:
     lines = ["<b>💸 Цены на программы</b>\n"]
     for item in PROGRAMS.values():
-        lines.append(f"• {item['title']} — <b>{format_currency(item['price_per_day'])}</b> / день")
+        lines.append(
+            f"• {item['title']} — <b>{format_currency(item['price_per_day'])}</b> / день"
+        )
     lines.append("\nИтоговая стоимость рассчитывается автоматически.")
     return "\n".join(lines)
+
 
 def build_promos_text() -> str:
     lines = ["<b>🎁 Доступные промокоды</b>\n"]
     with closing(get_connection()) as conn:
-        promos = conn.execute("SELECT * FROM promo_codes WHERE active = 1 ORDER BY discount_percent DESC").fetchall()
+        promos = conn.execute(
+            "SELECT * FROM promo_codes WHERE active = 1 ORDER BY discount_percent DESC"
+        ).fetchall()
     for promo in promos:
-        lines.append(f"• <b>{promo['code']}</b> — {promo['discount_percent']}% ({promo['description'] or 'без описания'})")
+        lines.append(
+            f"• <b>{h(promo['code'])}</b> — {promo['discount_percent']}%"
+            f" ({h(promo['description']) or 'без описания'})"
+        )
     return "\n".join(lines)
+
 
 def build_current_menu_text() -> str:
     lines = ["<b>🍽 Актуальное меню FitDaily</b>\n"]
@@ -788,6 +955,7 @@ def build_current_menu_text() -> str:
     lines.append("Меню может обновляться ежедневно.")
     return "\n".join(lines)
 
+
 def build_stop_list_text() -> str:
     lines = ["<b>⛔ Стоп-лист</b>\n"]
     if not STOP_LIST:
@@ -797,71 +965,82 @@ def build_stop_list_text() -> str:
             lines.append(f"• {item}")
     return "\n".join(lines)
 
+
 def build_faq_text() -> str:
     lines = ["<b>❓ Частые вопросы</b>\n"]
     for question, answer in FAQ.items():
         lines.append(f"<b>{question}</b>\n{answer}\n")
     return "\n".join(lines)
 
+
 def build_kaspi_demo_text(order_data: Dict[str, Any]) -> str:
     return (
         "<b>🟡 Оплата Kaspi (демо)</b>\n\n"
-        "Это выдуманный демонстрационный способ оплаты для примера интерфейса.\n"
-        "Настоящая интеграция с Kaspi здесь не подключена.\n\n"
+        "Это демонстрационный способ оплаты. Настоящая интеграция не подключена.\n\n"
         f"Сумма к оплате: <b>{format_currency(order_data['total_price'])}</b>\n"
-        "Статус оплаты будет сохранён как <b>Ожидает оплаты</b>."
+        "Статус оплаты: <b>Ожидает оплаты</b>."
     )
 
+
 def build_order_summary(data: Dict[str, Any]) -> str:
+    """FIX: все пользовательские данные экранируются через h()."""
     promo_line = ""
     if data.get("promo_code"):
         promo_line = (
-            f"🎁 Промокод: <b>{data['promo_code']}</b>\n"
-            f"📉 Скидка: <b>{data.get('discount_percent', 0)}%</b> ({format_currency(data.get('discount_amount', 0))})\n"
+            f"🎁 Промокод: <b>{h(data['promo_code'])}</b>\n"
+            f"📉 Скидка: <b>{data.get('discount_percent', 0)}%</b>"
+            f" ({format_currency(data.get('discount_amount', 0))})\n"
         )
+
+    payment_label = PAYMENT_METHODS.get(data.get("payment_method", ""), data.get("payment_method", "—"))
 
     return (
         "<b>✨ Проверьте ваш заказ</b>\n\n"
-        f"🆔 Номер: <b>{data['order_id']}</b>\n"
-        f"🥗 Программа: <b>{data['program_title']}</b>\n"
+        f"🆔 Номер: <b>{h(data['order_id'])}</b>\n"
+        f"🥗 Программа: <b>{h(data['program_title'])}</b>\n"
         f"📆 Срок: <b>{data['days']} дн.</b>\n"
         f"💰 Цена в день: <b>{format_currency(data['price_per_day'])}</b>\n"
         f"{promo_line}"
         f"💳 Итого: <b>{format_currency(data['total_price'])}</b>\n"
-        f"💸 Оплата: <b>{PAYMENT_METHODS.get(data['payment_method'], data['payment_method'])}</b>\n"
-        f"📌 Статус оплаты: <b>{data.get('payment_status', '—')}</b>\n\n"
-        f"👤 Имя: {data['name']}\n"
-        f"📞 Телефон: {data['phone']}\n"
-        f"📍 Адрес: {data['address']}\n"
-        f"🗓 Дата доставки: {data['delivery_date']}\n"
-        f"⏰ Время доставки: {data.get('delivery_time', '—')}\n"
-        f"📝 Комментарий: {data.get('comment', '—')}"
+        f"💸 Оплата: <b>{h(payment_label)}</b>\n"
+        f"📌 Статус оплаты: <b>{h(data.get('payment_status', '—'))}</b>\n\n"
+        f"👤 Имя: {h(data['name'])}\n"
+        f"📞 Телефон: {h(data['phone'])}\n"
+        f"📍 Адрес: {h(data['address'])}\n"
+        f"🗓 Дата доставки: {h(data['delivery_date'])}\n"
+        f"⏰ Время доставки: {h(data.get('delivery_time', '—'))}\n"
+        f"📝 Комментарий: {h(data.get('comment', '—'))}"
     )
 
+
 def build_admin_order_text(data: Dict[str, Any], user) -> str:
-    username = f"@{user.username}" if user.username else "не указан"
+    """FIX: все пользовательские данные экранируются через h()."""
+    username = f"@{h(user.username)}" if user.username else "не указан"
+    payment_label = PAYMENT_METHODS.get(data.get("payment_method", ""), data.get("payment_method", "—"))
+
     return (
         "<b>🆕 Новая заявка FitDaily</b>\n\n"
-        f"🆔 Заказ: <b>{data['order_id']}</b>\n"
-        f"📌 Статус: <b>{data.get('status', 'Новая')}</b>\n"
-        f"📌 Статус оплаты: <b>{data.get('payment_status', '—')}</b>\n"
-        f"💸 Способ оплаты: <b>{PAYMENT_METHODS.get(data.get('payment_method'), data.get('payment_method'))}</b>\n"
-        f"👤 Клиент: {data['name']}\n"
-        f"📞 Телефон: {data['phone']}\n"
-        f"📍 Адрес: {data['address']}\n"
-        f"🗓 Дата: {data['delivery_date']}\n"
-        f"⏰ Время: {data.get('delivery_time', '—')}\n"
-        f"🥗 Программа: {data['program_title']}\n"
+        f"🆔 Заказ: <b>{h(data['order_id'])}</b>\n"
+        f"📌 Статус: <b>{h(data.get('status', 'Новая'))}</b>\n"
+        f"📌 Статус оплаты: <b>{h(data.get('payment_status', '—'))}</b>\n"
+        f"💸 Способ оплаты: <b>{h(payment_label)}</b>\n"
+        f"👤 Клиент: {h(data['name'])}\n"
+        f"📞 Телефон: {h(data['phone'])}\n"
+        f"📍 Адрес: {h(data['address'])}\n"
+        f"🗓 Дата: {h(data['delivery_date'])}\n"
+        f"⏰ Время: {h(data.get('delivery_time', '—'))}\n"
+        f"🥗 Программа: {h(data['program_title'])}\n"
         f"📆 Срок: {data['days']} дн.\n"
-        f"🎁 Промокод: {data.get('promo_code') or 'нет'}\n"
+        f"🎁 Промокод: {h(data.get('promo_code') or 'нет')}\n"
         f"💰 Цена до скидки: {format_currency(data['price_per_day'] * data['days'])}\n"
         f"📉 Скидка: {format_currency(data.get('discount_amount', 0))}\n"
         f"💳 Итого: {format_currency(data['total_price'])}\n"
-        f"📝 Комментарий: {data.get('comment', '—')}\n\n"
+        f"📝 Комментарий: {h(data.get('comment', '—'))}\n\n"
         f"Telegram ID: <code>{user.id}</code>\n"
         f"Username: {username}\n\n"
         "Выберите статус ниже:"
     )
+
 
 def build_stats_text(title: str, orders: List[sqlite3.Row]) -> str:
     total_orders = len(orders)
@@ -875,58 +1054,59 @@ def build_stats_text(title: str, orders: List[sqlite3.Row]) -> str:
         by_program[order["program_title"]] = by_program.get(order["program_title"], 0) + 1
 
     lines = [
-        f"<b>{title}</b>",
+        f"<b>{h(title)}</b>",
         "",
         f"🧾 Заказов: <b>{total_orders}</b>",
         f"💰 Выручка: <b>{format_currency(total_revenue)}</b>",
         "",
         "<b>По статусам:</b>",
     ]
-    if by_status:
-        for status, count in by_status.items():
-            lines.append(f"• {status}: {count}")
-    else:
+    for status, count in (by_status.items() if by_status else []):
+        lines.append(f"• {h(status)}: {count}")
+    if not by_status:
         lines.append("• Нет данных")
 
     lines.append("")
     lines.append("<b>По программам:</b>")
-    if by_program:
-        for program, count in by_program.items():
-            lines.append(f"• {program}: {count}")
-    else:
+    for program, count in (by_program.items() if by_program else []):
+        lines.append(f"• {h(program)}: {count}")
+    if not by_program:
         lines.append("• Нет данных")
 
     return "\n".join(lines)
+
 
 def build_clients_text(clients: List[sqlite3.Row]) -> str:
     lines = ["<b>👥 Последние клиенты</b>\n"]
     for client in clients:
         lines.append(
-            f"<b>{client['full_name']}</b>\n"
-            f"📞 {client['phone']}\n"
+            f"<b>{h(client['full_name'])}</b>\n"
+            f"📞 {h(client['phone'])}\n"
             f"📦 Заказов: {client['total_orders']}\n"
             f"💰 Потрачено: {format_currency(client['total_spent'])}\n"
-            f"🥗 Любимая программа: {client['favorite_program'] or '—'}\n"
-            f"🕒 Последний заказ: {client['last_order_at']}\n"
+            f"🥗 Любимая программа: {h(client['favorite_program'] or '—')}\n"
+            f"🕒 Последний заказ: {h(client['last_order_at'])}\n"
         )
     return "\n".join(lines)
 
+
 def build_orders_text(title: str, orders: List[sqlite3.Row]) -> str:
     if not orders:
-        return f"<b>{title}</b>\n\nНет данных."
-    lines = [f"<b>{title}</b>\n"]
+        return f"<b>{h(title)}</b>\n\nНет данных."
+    lines = [f"<b>{h(title)}</b>\n"]
     for order in orders:
         lines.append(
-            f"<b>{order['order_id']}</b>\n"
-            f"👤 {order['full_name']}\n"
-            f"📞 {order['phone']}\n"
-            f"🥗 {order['program_title']}\n"
-            f"🗓 {order['delivery_date']} {order['delivery_time'] or ''}\n"
-            f"📌 {order['status']}\n"
+            f"<b>{h(order['order_id'])}</b>\n"
+            f"👤 {h(order['full_name'])}\n"
+            f"📞 {h(order['phone'])}\n"
+            f"🥗 {h(order['program_title'])}\n"
+            f"🗓 {h(order['delivery_date'])} {h(order['delivery_time'] or '')}\n"
+            f"📌 {h(order['status'])}\n"
             f"💳 {format_currency(order['total_price'])}\n"
         )
     text = "\n".join(lines)
     return text[:3900] + "\n\n..." if len(text) > 3900 else text
+
 
 def build_reviews_text(reviews: List[sqlite3.Row]) -> str:
     if not reviews:
@@ -934,12 +1114,13 @@ def build_reviews_text(reviews: List[sqlite3.Row]) -> str:
     lines = ["<b>⭐ Последние отзывы</b>\n"]
     for review in reviews:
         lines.append(
-            f"<b>{review['full_name'] or 'Клиент'}</b> — {review['rating']}/5\n"
-            f"🆔 {review['order_id']}\n"
-            f"💬 {review['review_text'] or 'Без текста'}\n"
-            f"🕒 {review['created_at']}\n"
+            f"<b>{h(review['full_name'] or 'Клиент')}</b> — {review['rating']}/5\n"
+            f"🆔 {h(review['order_id'])}\n"
+            f"💬 {h(review['review_text'] or 'Без текста')}\n"
+            f"🕒 {h(review['created_at'])}\n"
         )
     return "\n".join(lines)
+
 
 def client_segment(client: sqlite3.Row) -> str:
     total_orders = client["total_orders"]
@@ -961,11 +1142,13 @@ def client_segment(client: sqlite3.Row) -> str:
         pass
     return "Активный"
 
+
 def build_segments_text() -> str:
-    clients = get_recent_clients(1000)
-    stats = {"Новый": 0, "Постоянный": 0, "Активный": 0, "Спящий": 0}
+    clients = get_recent_clients(10000)
+    stats: Dict[str, int] = {"Новый": 0, "Постоянный": 0, "Активный": 0, "Спящий": 0}
     for client in clients:
-        stats[client_segment(client)] += 1
+        seg = client_segment(client)
+        stats[seg] = stats.get(seg, 0) + 1
     return (
         "<b>📊 Сегменты клиентов</b>\n\n"
         f"🆕 Новые: <b>{stats['Новый']}</b>\n"
@@ -974,17 +1157,21 @@ def build_segments_text() -> str:
         f"😴 Спящие: <b>{stats['Спящий']}</b>"
     )
 
+
 async def notify_user_about_status(bot: Bot, order: sqlite3.Row, new_status: str):
     try:
         text = (
-            f"<b>Обновление по заказу {order['order_id']}</b>\n\n"
-            f"📌 Новый статус: <b>{new_status}</b>\n"
-            f"🥗 Программа: {order['program_title']}\n"
+            f"<b>Обновление по заказу {h(order['order_id'])}</b>\n\n"
+            f"📌 Новый статус: <b>{h(new_status)}</b>\n"
+            f"🥗 Программа: {h(order['program_title'])}\n"
             f"💳 Сумма: {format_currency(order['total_price'])}"
         )
         await bot.send_message(order["telegram_user_id"], text)
         if new_status == "Передана в доставку":
-            await bot.send_message(order["telegram_user_id"], "🚚 Курьер выехал. Ожидайте доставку.")
+            await bot.send_message(
+                order["telegram_user_id"],
+                "🚚 Курьер выехал. Ожидайте доставку.",
+            )
         if new_status == "Доставлена":
             await bot.send_message(
                 order["telegram_user_id"],
@@ -994,13 +1181,14 @@ async def notify_user_about_status(bot: Bot, order: sqlite3.Row, new_status: str
     except Exception as e:
         logger.warning("Не удалось уведомить клиента: %s", e)
 
+
 def export_clients_to_csv(path: str):
     clients = get_recent_clients(10000)
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f, delimiter=";")
         writer.writerow([
             "full_name", "phone", "telegram_username", "address", "favorite_program",
-            "first_order_at", "last_order_at", "total_orders", "total_spent", "segment"
+            "first_order_at", "last_order_at", "total_orders", "total_spent", "segment",
         ])
         for client in clients:
             writer.writerow([
@@ -1016,44 +1204,56 @@ def export_clients_to_csv(path: str):
                 client_segment(client),
             ])
 
+
 # ======================================
 # USER HANDLERS
 # ======================================
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
     is_admin = admin_only(message.from_user.id)
-    text = (
+    await message.answer(
         f"Здравствуйте! Добро пожаловать в <b>{BRAND_NAME}</b> 🥗\n\n"
-        "Здесь можно оформить заказ, посмотреть меню, стоп-лист, промокоды и выбрать способ оплаты."
+        "Здесь можно оформить заказ, посмотреть меню, стоп-лист, "
+        "промокоды и выбрать способ оплаты.",
+        reply_markup=main_menu_keyboard(is_admin=is_admin),
     )
-    await message.answer(text, reply_markup=main_menu_keyboard(is_admin=is_admin))
+
 
 async def programs_handler(message: Message):
     await message.answer(
-        "<b>🥗 Программы питания FitDaily</b>\n\nНажмите на программу, чтобы посмотреть подробности.",
+        "<b>🥗 Программы питания FitDaily</b>\n\n"
+        "Нажмите на программу, чтобы посмотреть подробности.",
         reply_markup=programs_keyboard(),
     )
+
 
 async def current_menu_handler(message: Message):
     await message.answer(build_current_menu_text())
 
+
 async def stop_list_handler(message: Message):
     await message.answer(build_stop_list_text())
+
 
 async def promo_list_handler(message: Message):
     await message.answer(build_promos_text())
 
+
 async def faq_handler(message: Message):
     await message.answer(build_faq_text())
+
 
 async def prices_handler(message: Message):
     await message.answer(build_prices_text())
 
+
 async def delivery_handler(message: Message):
     await message.answer(DELIVERY_INFO)
 
+
 async def about_handler(message: Message):
     await message.answer(ABOUT_TEXT)
+
 
 async def manager_handler(message: Message):
     kb = InlineKeyboardMarkup(
@@ -1068,6 +1268,7 @@ async def manager_handler(message: Message):
         reply_markup=kb,
     )
 
+
 async def repeat_order_handler(message: Message, state: FSMContext):
     last_order = get_last_order_by_user(message.from_user.id)
     if not last_order:
@@ -1075,34 +1276,58 @@ async def repeat_order_handler(message: Message, state: FSMContext):
         return
 
     await state.clear()
-    # FIX: order_id не переносится из старого заказа — генерируем новый
+
+    # FIX: При повторе пересчитываем промокод — он мог стать неактивным.
+    base_total = last_order["price_per_day"] * last_order["days"]
+    promo_code = last_order["promo_code"]
+    if promo_code and get_promo(promo_code):
+        discount_percent, discount_amount = calculate_discount(base_total, promo_code)
+        total_price = max(base_total - discount_amount, 0)
+    else:
+        promo_code = None
+        discount_percent = 0
+        discount_amount = 0
+        total_price = base_total
+
     await state.update_data(
         program_key=last_order["program_key"],
         program_title=last_order["program_title"],
         price_per_day=last_order["price_per_day"],
         days=last_order["days"],
-        promo_code=last_order["promo_code"],
-        discount_percent=last_order["discount_percent"] or 0,
-        discount_amount=last_order["discount_amount"] or 0,
-        total_price=last_order["total_price"],
+        promo_code=promo_code,
+        discount_percent=discount_percent,
+        discount_amount=discount_amount,
+        total_price=total_price,
         name=last_order["full_name"],
         phone=last_order["phone"],
         address=last_order["address"],
         comment=last_order["comment"] or "Нет",
     )
     await state.set_state(OrderForm.entering_delivery_date)
+
+    promo_note = ""
+    if last_order["promo_code"] and not promo_code:
+        promo_note = "\n⚠️ Промокод из прошлого заказа больше не активен и не применён."
+
     await message.answer(
         "<b>🔁 Повтор заказа</b>\n\n"
-        f"Мы подставили ваш прошлый заказ: {last_order['program_title']} на {last_order['days']} дн.\n"
+        f"Мы подставили ваш прошлый заказ: "
+        f"{h(last_order['program_title'])} на {last_order['days']} дн.\n"
+        f"Итого: <b>{format_currency(total_price)}</b>{promo_note}\n\n"
         "Введите новую дату первой доставки в формате ДД.ММ.ГГГГ:"
     )
+
 
 async def review_start_handler(message: Message):
     last_order = get_last_order_by_user(message.from_user.id)
     if not last_order:
         await message.answer("Сначала оформите хотя бы один заказ.")
         return
-    await message.answer("Оцените последний заказ:", reply_markup=review_rating_keyboard(last_order["order_id"]))
+    await message.answer(
+        "Оцените последний заказ:",
+        reply_markup=review_rating_keyboard(last_order["order_id"]),
+    )
+
 
 async def order_start_handler(message: Message, state: FSMContext):
     await state.clear()
@@ -1112,6 +1337,7 @@ async def order_start_handler(message: Message, state: FSMContext):
         reply_markup=programs_keyboard(),
     )
 
+
 async def program_view_handler(callback: CallbackQuery):
     """Просмотр программы без изменения состояния FSM."""
     program_key = callback.data.split(":", 1)[1]
@@ -1120,8 +1346,8 @@ async def program_view_handler(callback: CallbackQuery):
         await callback.answer("Программа не найдена", show_alert=True)
         return
 
-    includes_text = "\n".join([f"• {item}" for item in program["includes"]])
-    menu_text = "\n".join([f"• {item}" for item in program["sample_menu"]])
+    includes_text = "\n".join(f"• {item}" for item in program["includes"])
+    menu_text = "\n".join(f"• {item}" for item in program["sample_menu"])
 
     await callback.message.edit_text(
         f"<b>{program['title']}</b>\n\n"
@@ -1136,17 +1362,20 @@ async def program_view_handler(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 async def programs_back_handler(callback: CallbackQuery):
     await callback.message.edit_text(
-        "<b>🥗 Программы питания FitDaily</b>\n\nНажмите на программу, чтобы посмотреть подробности.",
+        "<b>🥗 Программы питания FitDaily</b>\n\n"
+        "Нажмите на программу, чтобы посмотреть подробности.",
         reply_markup=programs_keyboard(),
     )
     await callback.answer()
 
+
 async def choose_program_handler(callback: CallbackQuery, state: FSMContext):
     """
-    FIX: Если пользователь нажал «Выбрать программу» вне контекста заказа
-    (FSM не в состоянии choosing_program) — мягко запускаем оформление заказа.
+    FIX: Если FSM не активен (None) — автоматически запускаем оформление заказа.
+    Если FSM активен в другом состоянии — предупреждаем пользователя.
     """
     program_key = callback.data.split(":", 1)[1]
     program = PROGRAMS.get(program_key)
@@ -1155,10 +1384,13 @@ async def choose_program_handler(callback: CallbackQuery, state: FSMContext):
         return
 
     current_state = await state.get_state()
-    # Принимаем выбор программы если мы в нужном состоянии или FSM вообще не запущен
-    if current_state not in (OrderForm.choosing_program.state, None):
+
+    if current_state is None:
+        # Пользователь смотрел программы не через оформление — запускаем заказ
+        await state.set_state(OrderForm.choosing_program)
+    elif current_state != OrderForm.choosing_program.state:
         await callback.answer(
-            "Сначала нажмите «🛒 Оформить заказ» для начала оформления.",
+            "Сначала нажмите «🛒 Оформить заказ» в меню.",
             show_alert=True,
         )
         return
@@ -1174,10 +1406,11 @@ async def choose_program_handler(callback: CallbackQuery, state: FSMContext):
         f"<b>{program['title']}</b>\n"
         f"{program['description']}\n"
         f"Калорийность: {program['calories']}\n\n"
-        "Теперь выберите продолжительность программы:",
+        "Выберите продолжительность программы:",
         reply_markup=durations_keyboard(),
     )
     await callback.answer()
+
 
 async def choose_duration_handler(callback: CallbackQuery, state: FSMContext):
     duration_key = callback.data.split(":", 1)[1]
@@ -1189,7 +1422,13 @@ async def choose_duration_handler(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     total_price = data["price_per_day"] * days
 
-    await state.update_data(days=days, total_price=total_price, discount_percent=0, discount_amount=0, promo_code=None)
+    await state.update_data(
+        days=days,
+        total_price=total_price,
+        discount_percent=0,
+        discount_amount=0,
+        promo_code=None,
+    )
     await state.set_state(OrderForm.entering_promo)
 
     await callback.message.edit_text(
@@ -1200,6 +1439,7 @@ async def choose_duration_handler(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+
 async def promo_callback_handler(callback: CallbackQuery, state: FSMContext):
     action = callback.data.split(":", 1)[1]
     if action == "skip":
@@ -1207,12 +1447,14 @@ async def promo_callback_handler(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("Промокод пропущен.\n\nВведите ваше имя:")
     else:
         await state.set_state(OrderForm.entering_promo)
-        await callback.message.edit_text("Введите промокод текстом:")
+        await callback.message.edit_text(
+            "Введите промокод или напишите «Пропустить»:"
+        )
     await callback.answer()
+
 
 async def promo_text_handler(message: Message, state: FSMContext):
     text = message.text.strip()
-    # Позволяем написать "пропустить" текстом
     if text.lower() == "пропустить":
         await state.set_state(OrderForm.entering_name)
         await message.answer("Промокод пропущен.\n\nВведите ваше имя:")
@@ -1222,7 +1464,10 @@ async def promo_text_handler(message: Message, state: FSMContext):
     data = await state.get_data()
     promo = get_promo(code)
     if not promo:
-        await message.answer("Промокод не найден или неактивен. Введите другой или напишите «Пропустить».")
+        await message.answer(
+            "Промокод не найден или неактивен.\n"
+            "Введите другой или напишите «Пропустить»."
+        )
         return
 
     base_total = data["price_per_day"] * data["days"]
@@ -1237,11 +1482,12 @@ async def promo_text_handler(message: Message, state: FSMContext):
     )
     await state.set_state(OrderForm.entering_name)
     await message.answer(
-        f"Промокод <b>{code}</b> применён.\n"
+        f"Промокод <b>{h(code)}</b> применён.\n"
         f"Скидка: <b>{discount_percent}%</b>\n"
         f"Итого: <b>{format_currency(total_price)}</b>\n\n"
         "Введите ваше имя:"
     )
+
 
 async def name_handler(message: Message, state: FSMContext):
     name = message.text.strip()
@@ -1252,20 +1498,25 @@ async def name_handler(message: Message, state: FSMContext):
     await state.set_state(OrderForm.entering_phone)
     await message.answer("Введите номер телефона:")
 
+
 async def phone_handler(message: Message, state: FSMContext):
     phone = message.text.strip()
     if not validate_phone(phone):
-        await message.answer("Введите корректный номер телефона. Пример: +77011234567")
+        await message.answer(
+            "Введите корректный номер телефона.\nПример: +77011234567"
+        )
         return
 
-    blacklist = is_blacklisted(phone)
-    if blacklist:
-        await message.answer("К сожалению, оформление недоступно. Свяжитесь с менеджером.")
+    if is_blacklisted(phone):
+        await message.answer(
+            "К сожалению, оформление недоступно. Свяжитесь с менеджером."
+        )
         return
 
     await state.update_data(phone=phone)
     await state.set_state(OrderForm.entering_address)
     await message.answer("Введите адрес доставки:")
+
 
 async def address_handler(message: Message, state: FSMContext):
     address = message.text.strip()
@@ -1274,26 +1525,40 @@ async def address_handler(message: Message, state: FSMContext):
         return
     await state.update_data(address=address)
     await state.set_state(OrderForm.entering_delivery_date)
-    await message.answer("Введите дату первой доставки в формате ДД.ММ.ГГГГ, например: 22.04.2026")
+    await message.answer(
+        "Введите дату первой доставки в формате ДД.ММ.ГГГГ\n"
+        "Например: 22.04.2026"
+    )
+
 
 async def delivery_date_handler(message: Message, state: FSMContext):
     date_text = message.text.strip()
     if not validate_delivery_date(date_text):
-        await message.answer("Введите корректную дату не раньше сегодняшней. Пример: 22.04.2026")
+        await message.answer(
+            f"Введите корректную дату (сегодня или до {MAX_DELIVERY_DAYS_AHEAD} дней вперёд).\n"
+            "Пример: 22.04.2026"
+        )
         return
     await state.update_data(delivery_date=date_text)
     await state.set_state(OrderForm.choosing_delivery_time)
-    await message.answer("Выберите удобное время доставки:", reply_markup=delivery_time_keyboard())
+    await message.answer(
+        "Выберите удобное время доставки:",
+        reply_markup=delivery_time_keyboard(),
+    )
+
 
 async def delivery_time_handler(callback: CallbackQuery, state: FSMContext):
+    # FIX: используем префикс "dtime:" (см. delivery_time_keyboard)
     slot = callback.data.split(":", 1)[1]
     await state.update_data(delivery_time=slot)
     await state.set_state(OrderForm.entering_comment)
     await callback.message.edit_text(
-        f"Время доставки выбрано: <b>{slot}</b>\n\n"
-        "Введите комментарий к заказу. Если комментария нет, напишите: Нет"
+        f"Время доставки выбрано: <b>{h(slot)}</b>\n\n"
+        "Введите комментарий к заказу.\n"
+        "Если комментария нет — напишите: Нет"
     )
     await callback.answer()
+
 
 async def comment_handler(message: Message, state: FSMContext):
     comment = message.text.strip()
@@ -1301,9 +1566,9 @@ async def comment_handler(message: Message, state: FSMContext):
     await state.set_state(OrderForm.choosing_payment)
     await message.answer("Выберите способ оплаты:", reply_markup=payment_keyboard())
 
+
 async def payment_handler(callback: CallbackQuery, state: FSMContext):
     payment_method = callback.data.split(":", 1)[1]
-    # FIX: генерируем order_id здесь гарантированно
     order_id = generate_order_id(callback.from_user.id)
 
     payment_status = "Не требуется"
@@ -1326,13 +1591,14 @@ async def payment_handler(callback: CallbackQuery, state: FSMContext):
     elif payment_method == "card_demo":
         text += (
             "\n\n<b>💳 Оплата картой (демо)</b>\n\n"
-            "Это демонстрационный сценарий без реального процессинга.\n"
-            "Статус оплаты будет сохранён как <b>Ожидает оплаты</b>."
+            "Демонстрационный сценарий без реального процессинга.\n"
+            "Статус оплаты: <b>Ожидает оплаты</b>."
         )
 
     await state.set_state(OrderForm.confirming_order)
     await callback.message.edit_text(text, reply_markup=confirm_keyboard())
     await callback.answer()
+
 
 async def confirm_handler(callback: CallbackQuery, state: FSMContext, bot: Bot):
     action = callback.data.split(":", 1)[1]
@@ -1362,15 +1628,18 @@ async def confirm_handler(callback: CallbackQuery, state: FSMContext, bot: Bot):
     # action == "yes"
     data = await state.get_data()
 
-    # Проверка что все обязательные поля присутствуют
-    required_fields = ["order_id", "program_key", "program_title", "price_per_day",
-                       "days", "total_price", "name", "phone", "address",
-                       "delivery_date", "payment_method"]
+    required_fields = [
+        "order_id", "program_key", "program_title", "price_per_day",
+        "days", "total_price", "name", "phone", "address",
+        "delivery_date", "payment_method",
+    ]
     missing = [f for f in required_fields if not data.get(f)]
     if missing:
         logger.error("Отсутствуют поля при подтверждении заказа: %s", missing)
-        await callback.answer("Ошибка данных заказа. Пожалуйста, начните заново.", show_alert=True)
         await state.clear()
+        await callback.answer(
+            "Ошибка данных. Пожалуйста, начните заново.", show_alert=True
+        )
         await bot.send_message(
             callback.from_user.id,
             "Произошла ошибка. Пожалуйста, оформите заказ заново.",
@@ -1378,7 +1647,7 @@ async def confirm_handler(callback: CallbackQuery, state: FSMContext, bot: Bot):
         )
         return
 
-    db_status = "✅ Заявка и клиент сохранены в базе данных."
+    db_status = "✅ Заявка и клиент сохранены."
     try:
         save_order_to_db(data, callback.from_user)
         upsert_client(data, callback.from_user)
@@ -1398,47 +1667,67 @@ async def confirm_handler(callback: CallbackQuery, state: FSMContext, bot: Bot):
         logger.exception("Admin notify error: %s", error)
 
     manager_kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="💬 Написать менеджеру в WhatsApp", url=MANAGER_WHATSAPP)]]
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💬 Написать менеджеру в WhatsApp",
+                    url=MANAGER_WHATSAPP,
+                )
+            ]
+        ]
     )
 
     await callback.message.edit_text(
         "<b>Спасибо! Ваш заказ принят.</b>\n\n"
-        f"Номер заказа: <b>{data['order_id']}</b>\n"
-        f"Статус заказа: <b>{data.get('status', 'Новая')}</b>\n"
-        f"Статус оплаты: <b>{data.get('payment_status', '—')}</b>\n\n"
+        f"Номер заказа: <b>{h(data['order_id'])}</b>\n"
+        f"Статус заказа: <b>{h(data.get('status', 'Новая'))}</b>\n"
+        f"Статус оплаты: <b>{h(data.get('payment_status', '—'))}</b>\n\n"
         f"{admin_status}\n{db_status}"
     )
     await bot.send_message(
         callback.from_user.id,
-        "Для быстрой связи можете сразу написать менеджеру:",
+        "Для быстрой связи можете написать менеджеру:",
         reply_markup=manager_kb,
     )
     await bot.send_message(
         callback.from_user.id,
-        "Главное меню открыто снова.",
+        "Главное меню:",
         reply_markup=main_menu_keyboard(is_admin=is_admin),
     )
     await state.clear()
     await callback.answer()
 
+
 async def review_callback_handler(callback: CallbackQuery, state: FSMContext):
-    parts = callback.data.split(":")
+    # FIX: используем split(":", 2) — order_id не содержит ":", но безопаснее
+    parts = callback.data.split(":", 2)
     if len(parts) != 3:
         await callback.answer("Ошибка данных отзыва", show_alert=True)
         return
-    _, order_id, rating = parts
+    _, order_id, rating_str = parts
+    try:
+        rating = int(rating_str)
+        if not (1 <= rating <= 5):
+            raise ValueError
+    except ValueError:
+        await callback.answer("Некорректная оценка", show_alert=True)
+        return
+
     await state.set_state(ReviewForm.entering_review)
-    await state.update_data(review_order_id=order_id, review_rating=int(rating))
+    await state.update_data(review_order_id=order_id, review_rating=rating)
     await callback.message.edit_text(
-        f"Спасибо! Вы поставили оценку <b>{rating}/5</b>.\n\nТеперь напишите короткий отзыв. Если не хотите, напишите: Нет"
+        f"Спасибо! Вы поставили оценку <b>{rating}/5</b>.\n\n"
+        "Напишите короткий отзыв. Если не хотите — напишите: Нет"
     )
     await callback.answer()
+
 
 async def review_text_handler(message: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
     order_id = data.get("review_order_id")
     rating = data.get("review_rating")
     review_text = message.text.strip()
+
     order = get_order_by_order_id(order_id) if order_id else None
     full_name = order["full_name"] if order else (message.from_user.full_name or "Клиент")
 
@@ -1448,36 +1737,41 @@ async def review_text_handler(message: Message, state: FSMContext, bot: Bot):
         message.from_user.id,
         full_name,
         rating,
-        review_text if review_text.lower() != "нет" else "",
+        "" if review_text.lower() == "нет" else review_text,
     )
 
     await message.answer("Спасибо за отзыв! 💚", reply_markup=main_menu_keyboard(is_admin=is_admin))
     try:
         await bot.send_message(
             ADMIN_TELEGRAM_ID,
-            f"<b>⭐ Новый отзыв</b>\n\nЗаказ: <b>{order_id}</b>\nКлиент: {full_name}\nОценка: <b>{rating}/5</b>\nОтзыв: {review_text}"
+            f"<b>⭐ Новый отзыв</b>\n\n"
+            f"Заказ: <b>{h(order_id)}</b>\n"
+            f"Клиент: {h(full_name)}\n"
+            f"Оценка: <b>{rating}/5</b>\n"
+            f"Отзыв: {h(review_text)}",
         )
     except Exception:
         pass
     await state.clear()
 
+
 # ======================================
 # ADMIN HANDLERS
 # ======================================
 async def admin_panel_handler(message: Message):
-    # FIX: жёсткая проверка — только один конкретный администратор
     if not admin_only(message.from_user.id):
         await message.answer("У вас нет доступа к этому разделу.")
         return
     await message.answer(
-        "<b>👑 Админ панель FitDaily</b>\n\nВыберите нужное действие ниже:",
+        "<b>👑 Админ панель FitDaily</b>\n\nВыберите действие:",
         reply_markup=admin_main_keyboard(),
     )
+
 
 async def admin_help_handler(message: Message):
     if not admin_only(message.from_user.id):
         return
-    text = (
+    await message.answer(
         "<b>Команды администратора</b>\n\n"
         "/orders_today — статистика за сегодня\n"
         "/orders_week — статистика за 7 дней\n"
@@ -1487,35 +1781,42 @@ async def admin_help_handler(message: Message):
         "/reviews — последние отзывы\n"
         "/deliveries_today — доставки на сегодня\n"
         "/deliveries_tomorrow — доставки на завтра\n"
-        "/find_client +7701... — поиск клиента по номеру\n"
-        "/export_clients — выгрузка клиентов в CSV\n"
-        "/note_phone +7701... текст — заметка по клиенту\n"
-        "/blacklist_phone +7701... причина — чёрный список\n"
+        "/find_client +7701... — поиск по номеру\n"
+        "/export_clients — выгрузка CSV\n"
+        "/note_phone +7701... текст — заметка\n"
+        "/blacklist_phone +7701... причина — ЧС\n"
         "/order FD-... — подробности заказа\n"
-        "/set_status FD-... Доставлена — сменить статус вручную"
+        "/set_status FD-... Доставлена — сменить статус"
     )
-    await message.answer(text)
+
 
 async def orders_today_handler(message: Message):
     if not admin_only(message.from_user.id):
         return
     start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     end = start + timedelta(days=1)
-    orders = get_orders_between(start, end)
-    await message.answer(build_stats_text("📊 Статистика за сегодня", orders))
+    await message.answer(
+        build_stats_text("📊 Статистика за сегодня", get_orders_between(start, end))
+    )
+
 
 async def orders_week_handler(message: Message):
     if not admin_only(message.from_user.id):
         return
     end = datetime.now() + timedelta(seconds=1)
-    start = datetime.now() - timedelta(days=7)
-    orders = get_orders_between(start, end)
-    await message.answer(build_stats_text("📅 Статистика за 7 дней", orders))
+    start = end - timedelta(days=7)
+    await message.answer(
+        build_stats_text("📅 Статистика за 7 дней", get_orders_between(start, end))
+    )
+
 
 async def recent_orders_handler(message: Message):
     if not admin_only(message.from_user.id):
         return
-    await message.answer(build_orders_text("🧾 Последние 10 заказов", get_recent_orders(10)))
+    await message.answer(
+        build_orders_text("🧾 Последние 10 заказов", get_recent_orders(10))
+    )
+
 
 async def clients_handler(message: Message):
     if not admin_only(message.from_user.id):
@@ -1524,36 +1825,58 @@ async def clients_handler(message: Message):
     if not clients:
         await message.answer("Клиентов пока нет.")
         return
-    await message.answer(build_clients_text(clients))
+    text = build_clients_text(clients)
+    if len(text) > 4096:
+        text = text[:4000] + "\n\n..."
+    await message.answer(text)
+
 
 async def segments_handler(message: Message):
     if not admin_only(message.from_user.id):
         return
     await message.answer(build_segments_text())
 
+
 async def reviews_handler(message: Message):
     if not admin_only(message.from_user.id):
         return
     await message.answer(build_reviews_text(get_reviews(20)))
 
+
 async def deliveries_today_handler(message: Message):
     if not admin_only(message.from_user.id):
         return
     date_text = datetime.now().strftime("%d.%m.%Y")
-    await message.answer(build_orders_text(f"🚚 Доставки на {date_text}", get_orders_by_delivery_date(date_text)))
+    await message.answer(
+        build_orders_text(f"🚚 Доставки на {date_text}", get_orders_by_delivery_date(date_text))
+    )
+
 
 async def deliveries_tomorrow_handler(message: Message):
     if not admin_only(message.from_user.id):
         return
     date_text = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
-    await message.answer(build_orders_text(f"🗓 Доставки на {date_text}", get_orders_by_delivery_date(date_text)))
+    await message.answer(
+        build_orders_text(f"🗓 Доставки на {date_text}", get_orders_by_delivery_date(date_text))
+    )
+
 
 async def export_clients_handler(message: Message):
     if not admin_only(message.from_user.id):
         return
     path = "clients_export.csv"
-    export_clients_to_csv(path)
-    await message.answer_document(FSInputFile(path), caption="Экспорт клиентской базы")
+    try:
+        export_clients_to_csv(path)
+        await message.answer_document(
+            FSInputFile(path), caption="Экспорт клиентской базы"
+        )
+    finally:
+        # FIX: удаляем временный файл после отправки
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
 
 async def find_client_handler(message: Message):
     if not admin_only(message.from_user.id):
@@ -1562,8 +1885,7 @@ async def find_client_handler(message: Message):
     if len(parts) < 2:
         await message.answer("Использование: /find_client +77011234567")
         return
-    phone = parts[1].strip()
-    clients = get_clients_by_phone(phone)
+    clients = get_clients_by_phone(parts[1].strip())
     if not clients:
         await message.answer("Клиент не найден.")
         return
@@ -1571,19 +1893,20 @@ async def find_client_handler(message: Message):
     lines = ["<b>🔎 Результаты поиска</b>\n"]
     for client in clients:
         lines.append(
-            f"<b>{client['full_name']}</b>\n"
-            f"📞 {client['phone']}\n"
+            f"<b>{h(client['full_name'])}</b>\n"
+            f"📞 {h(client['phone'])}\n"
             f"📦 Заказов: {client['total_orders']}\n"
             f"💰 Потрачено: {format_currency(client['total_spent'])}\n"
-            f"🥗 Любимая программа: {client['favorite_program'] or '—'}\n"
+            f"🥗 Любимая программа: {h(client['favorite_program'] or '—')}\n"
         )
         notes = get_client_notes(client["phone"])[:3]
         if notes:
             lines.append("📝 Заметки:")
             for note in notes:
-                lines.append(f"• {note['note_text']} ({note['created_at']})")
+                lines.append(f"• {h(note['note_text'])} ({h(note['created_at'])})")
         lines.append("")
     await message.answer("\n".join(lines))
+
 
 async def note_phone_handler(message: Message):
     if not admin_only(message.from_user.id):
@@ -1592,9 +1915,9 @@ async def note_phone_handler(message: Message):
     if len(parts) < 3:
         await message.answer("Использование: /note_phone +77011234567 Текст заметки")
         return
-    phone, note_text = parts[1], parts[2]
-    add_client_note(phone, note_text)
+    add_client_note(parts[1], parts[2])
     await message.answer("Заметка сохранена.")
+
 
 async def blacklist_phone_handler(message: Message):
     if not admin_only(message.from_user.id):
@@ -1603,9 +1926,9 @@ async def blacklist_phone_handler(message: Message):
     if len(parts) < 3:
         await message.answer("Использование: /blacklist_phone +77011234567 Причина")
         return
-    phone, reason = parts[1], parts[2]
-    add_to_blacklist(phone, reason)
+    add_to_blacklist(parts[1], parts[2])
     await message.answer("Клиент добавлен в чёрный список.")
+
 
 async def order_detail_handler(message: Message):
     if not admin_only(message.from_user.id):
@@ -1614,37 +1937,36 @@ async def order_detail_handler(message: Message):
     if len(parts) < 2:
         await message.answer("Использование: /order FD-123")
         return
-
-    order_id = parts[1].strip()
-    order = get_order_by_order_id(order_id)
+    order = get_order_by_order_id(parts[1].strip())
     if not order:
         await message.answer("Заказ не найден.")
         return
 
+    payment_label = PAYMENT_METHODS.get(order["payment_method"], order["payment_method"] or "—")
     text = (
-        f"<b>Заказ {order['order_id']}</b>\n\n"
-        f"📌 Статус: <b>{order['status']}</b>\n"
-        f"📌 Оплата: <b>{order['payment_status']}</b>\n"
-        f"💳 Способ оплаты: <b>{PAYMENT_METHODS.get(order['payment_method'], order['payment_method'])}</b>\n"
-        f"👤 Клиент: {order['full_name']}\n"
-        f"📞 Телефон: {order['phone']}\n"
-        f"📍 Адрес: {order['address']}\n"
-        f"🗓 Дата доставки: {order['delivery_date']}\n"
-        f"⏰ Время доставки: {order['delivery_time'] or 'не указано'}\n"
-        f"🥗 Программа: {order['program_title']}\n"
+        f"<b>Заказ {h(order['order_id'])}</b>\n\n"
+        f"📌 Статус: <b>{h(order['status'])}</b>\n"
+        f"📌 Оплата: <b>{h(order['payment_status'])}</b>\n"
+        f"💳 Способ оплаты: <b>{h(payment_label)}</b>\n"
+        f"👤 Клиент: {h(order['full_name'])}\n"
+        f"📞 Телефон: {h(order['phone'])}\n"
+        f"📍 Адрес: {h(order['address'])}\n"
+        f"🗓 Дата доставки: {h(order['delivery_date'])}\n"
+        f"⏰ Время доставки: {h(order['delivery_time'] or 'не указано')}\n"
+        f"🥗 Программа: {h(order['program_title'])}\n"
         f"📆 Срок: {order['days']} дн.\n"
-        f"🎁 Промокод: {order['promo_code'] or 'нет'}\n"
+        f"🎁 Промокод: {h(order['promo_code'] or 'нет')}\n"
         f"📉 Скидка: {format_currency(order['discount_amount'] or 0)}\n"
         f"💳 Итого: {format_currency(order['total_price'])}\n"
-        f"📝 Комментарий: {order['comment']}\n"
-        f"🕒 Создан: {order['created_at']}"
+        f"📝 Комментарий: {h(order['comment'] or '—')}\n"
+        f"🕒 Создан: {h(order['created_at'])}"
     )
     await message.answer(text, reply_markup=admin_status_keyboard(order["order_id"]))
+
 
 async def set_status_handler(message: Message, bot: Bot):
     if not admin_only(message.from_user.id):
         return
-
     parts = message.text.strip().split(maxsplit=2)
     if len(parts) < 3:
         await message.answer("Использование: /set_status FD-123 Доставлена")
@@ -1654,11 +1976,12 @@ async def set_status_handler(message: Message, bot: Bot):
     new_status = parts[2].strip()
 
     if new_status not in STATUSES:
-        await message.answer(f"Недопустимый статус. Допустимые: {', '.join(STATUSES)}")
+        await message.answer(
+            f"Недопустимый статус.\nДопустимые: {', '.join(STATUSES)}"
+        )
         return
 
-    updated = update_order_status(order_id, new_status)
-    if not updated:
+    if not update_order_status(order_id, new_status):
         await message.answer("Заказ не найден.")
         return
 
@@ -1666,133 +1989,164 @@ async def set_status_handler(message: Message, bot: Bot):
     if order:
         await notify_user_about_status(bot, order, new_status)
 
-    await message.answer(f"Статус заказа <b>{order_id}</b> обновлён: <b>{new_status}</b>")
+    await message.answer(
+        f"Статус заказа <b>{h(order_id)}</b> обновлён: <b>{h(new_status)}</b>"
+    )
+
 
 async def admin_callback_handler(callback: CallbackQuery):
+    """
+    FIX: добавлены явные return после каждой ветки,
+    callback.answer() вызывается один раз в конце каждой ветки.
+    """
     if not admin_only(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
-    # FIX: переименован callback с "admin:status:..." на "admin:status_filter:..."
-    # чтобы не конфликтовать с "setstatus:" обработчиком
-    data = callback.data  # например "admin:today" или "admin:status_filter:Готовится"
-    parts = data.split(":", 2)
+    parts = callback.data.split(":", 2)
     action = parts[1] if len(parts) > 1 else ""
 
-    if action == "status_filter":
-        status = parts[2] if len(parts) > 2 else ""
-        await callback.message.edit_text(
-            build_orders_text(f"📌 Заказы со статусом: {status}", get_orders_by_status(status, 20)),
-            reply_markup=admin_main_keyboard(),
+    if action == "sf":
+        # FIX: short status filter code
+        code = parts[2] if len(parts) > 2 else ""
+        status = STATUS_CODES.get(code, "")
+        text = build_orders_text(
+            f"📌 Заказы: {status}",
+            get_orders_by_status(status, 20),
         )
+        await callback.message.edit_text(text, reply_markup=admin_main_keyboard())
+        await callback.answer()
+        return
 
-    elif action == "today":
+    if action == "today":
         start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1)
-        orders = get_orders_between(start, end)
         await callback.message.edit_text(
-            build_stats_text("📊 Статистика за сегодня", orders),
+            build_stats_text("📊 Статистика за сегодня", get_orders_between(start, end)),
             reply_markup=admin_main_keyboard(),
         )
+        await callback.answer()
+        return
 
-    elif action == "week":
+    if action == "week":
         end = datetime.now() + timedelta(seconds=1)
-        start = datetime.now() - timedelta(days=7)
-        orders = get_orders_between(start, end)
+        start = end - timedelta(days=7)
         await callback.message.edit_text(
-            build_stats_text("📅 Статистика за 7 дней", orders),
+            build_stats_text("📅 Статистика за 7 дней", get_orders_between(start, end)),
             reply_markup=admin_main_keyboard(),
         )
+        await callback.answer()
+        return
 
-    elif action == "recent":
+    if action == "recent":
         await callback.message.edit_text(
             build_orders_text("🧾 Последние заказы", get_recent_orders(10)),
             reply_markup=admin_main_keyboard(),
         )
+        await callback.answer()
+        return
 
-    elif action == "clients":
+    if action == "clients":
         clients = get_recent_clients(20)
-        text = "Клиентов пока нет." if not clients else build_clients_text(clients)
+        text = build_clients_text(clients) if clients else "Клиентов пока нет."
         if len(text) > 3900:
             text = text[:3900] + "\n\n..."
         await callback.message.edit_text(text, reply_markup=admin_main_keyboard())
+        await callback.answer()
+        return
 
-    elif action == "deliveries_today":
+    if action == "del_today":
         date_text = datetime.now().strftime("%d.%m.%Y")
         await callback.message.edit_text(
-            build_orders_text(f"🚚 Доставки на {date_text}", get_orders_by_delivery_date(date_text)),
+            build_orders_text(
+                f"🚚 Доставки на {date_text}",
+                get_orders_by_delivery_date(date_text),
+            ),
             reply_markup=admin_main_keyboard(),
         )
+        await callback.answer()
+        return
 
-    elif action == "deliveries_tomorrow":
+    if action == "del_tomorrow":
         date_text = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
         await callback.message.edit_text(
-            build_orders_text(f"🗓 Доставки на {date_text}", get_orders_by_delivery_date(date_text)),
+            build_orders_text(
+                f"🗓 Доставки на {date_text}",
+                get_orders_by_delivery_date(date_text),
+            ),
             reply_markup=admin_main_keyboard(),
         )
+        await callback.answer()
+        return
 
-    elif action == "reviews":
+    if action == "reviews":
         await callback.message.edit_text(
             build_reviews_text(get_reviews(20)),
             reply_markup=admin_main_keyboard(),
         )
+        await callback.answer()
+        return
 
-    elif action == "segments":
+    if action == "segments":
         await callback.message.edit_text(
             build_segments_text(),
             reply_markup=admin_main_keyboard(),
         )
+        await callback.answer()
+        return
 
     await callback.answer()
 
+
 async def setstatus_callback_handler(callback: CallbackQuery, bot: Bot):
     """
-    FIX: Переименован с 'status:' на 'setstatus:' чтобы не конфликтовать
-    с admin:status_filter: обработчиком.
+    FIX: callback_data формат "ss:{order_id}:{status_code}"
+    Статус кодируется коротким кодом (s0-s6) для соблюдения лимита 64 байта.
     """
     if not admin_only(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
-    # Формат: setstatus:{order_id}:{new_status}
-    # order_id может содержать '-', статус может содержать пробелы
     parts = callback.data.split(":", 2)
-    if len(parts) < 3:
+    if len(parts) != 3:
         await callback.answer("Некорректный формат", show_alert=True)
         return
 
-    order_id = parts[1]
-    new_status = parts[2]
-
-    if new_status not in STATUSES:
+    _, order_id, status_code = parts
+    new_status = STATUS_CODES.get(status_code)
+    if not new_status:
         await callback.answer("Некорректный статус", show_alert=True)
         return
 
-    updated = update_order_status(order_id, new_status)
-    if not updated:
+    if not update_order_status(order_id, new_status):
         await callback.answer("Заказ не найден", show_alert=True)
         return
 
     order = get_order_by_order_id(order_id)
-    if order:
-        text = (
-            f"<b>Заказ {order['order_id']}</b>\n\n"
-            f"📌 Статус: <b>{order['status']}</b>\n"
-            f"📌 Оплата: <b>{order['payment_status']}</b>\n"
-            f"👤 Клиент: {order['full_name']}\n"
-            f"📞 Телефон: {order['phone']}\n"
-            f"📍 Адрес: {order['address']}\n"
-            f"🗓 Дата доставки: {order['delivery_date']}\n"
-            f"⏰ Время доставки: {order['delivery_time'] or 'не указано'}\n"
-            f"🥗 Программа: {order['program_title']}\n"
-            f"📆 Срок: {order['days']} дн.\n"
-            f"💳 Итого: {format_currency(order['total_price'])}\n"
-            f"📝 Комментарий: {order['comment']}"
-        )
-        await callback.message.edit_text(text, reply_markup=admin_status_keyboard(order_id))
-        await notify_user_about_status(bot, order, new_status)
+    if not order:
+        await callback.answer(f"Статус обновлён: {new_status}")
+        return
 
-    await callback.answer(f"Статус обновлён: {new_status}")
+    payment_label = PAYMENT_METHODS.get(order["payment_method"], order["payment_method"] or "—")
+    text = (
+        f"<b>Заказ {h(order['order_id'])}</b>\n\n"
+        f"📌 Статус: <b>{h(order['status'])}</b>\n"
+        f"📌 Оплата: <b>{h(order['payment_status'])}</b>\n"
+        f"💸 Способ: <b>{h(payment_label)}</b>\n"
+        f"👤 Клиент: {h(order['full_name'])}\n"
+        f"📞 Телефон: {h(order['phone'])}\n"
+        f"📍 Адрес: {h(order['address'])}\n"
+        f"🗓 Дата доставки: {h(order['delivery_date'])}\n"
+        f"⏰ Время: {h(order['delivery_time'] or 'не указано')}\n"
+        f"🥗 Программа: {h(order['program_title'])}\n"
+        f"📆 Срок: {order['days']} дн.\n"
+        f"💳 Итого: {format_currency(order['total_price'])}\n"
+        f"📝 Комментарий: {h(order['comment'] or '—')}"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_status_keyboard(order_id))
+    await notify_user_about_status(bot, order, new_status)
+    await callback.answer(f"Статус: {new_status}")
+
 
 # ======================================
 # FALLBACK
@@ -1800,20 +2154,26 @@ async def setstatus_callback_handler(callback: CallbackQuery, bot: Bot):
 async def fallback_handler(message: Message, state: FSMContext):
     current_state = await state.get_state()
 
-    # FIX: в состоянии промокода разрешаем «пропустить» текстом
-    if current_state == OrderForm.entering_promo.state and message.text.strip().lower() == "пропустить":
-        await state.set_state(OrderForm.entering_name)
-        await message.answer("Промокод пропущен.\n\nВведите ваше имя:")
+    # В состоянии промокода принимаем «пропустить» как отдельный текст
+    if current_state == OrderForm.entering_promo.state:
+        if message.text and message.text.strip().lower() == "пропустить":
+            await state.set_state(OrderForm.entering_name)
+            await message.answer("Промокод пропущен.\n\nВведите ваше имя:")
+        else:
+            # Перенаправляем в promo_text_handler логику
+            await promo_text_handler(message, state)
         return
 
-    # Если нет активного FSM — показываем подсказку
     if current_state is None:
         await message.answer(
-            "Я не понял сообщение. Выберите нужный раздел через меню ниже.",
-            reply_markup=main_menu_keyboard(is_admin=admin_only(message.from_user.id)),
+            "Я не понял сообщение. Выберите нужный раздел через меню.",
+            reply_markup=main_menu_keyboard(
+                is_admin=admin_only(message.from_user.id)
+            ),
         )
-    # Если FSM активен, но сообщение не ожидается — молча игнорируем
-    # (не сбиваем состояние пользователя случайным сообщением)
+    # Если FSM активен в другом состоянии — молча игнорируем,
+    # чтобы не сбить ожидание конкретного ввода.
+
 
 # ======================================
 # MAIN
@@ -1843,21 +2203,7 @@ async def main():
     dp.message.register(manager_handler, F.text == "💬 Менеджер")
     dp.message.register(admin_panel_handler, F.text == "👑 Админ панель")
 
-    # ── Callback query handlers ────────────────────────────────────────────
-    dp.callback_query.register(program_view_handler, F.data.startswith("program_view:"))
-    dp.callback_query.register(programs_back_handler, F.data == "programs:back")
-    dp.callback_query.register(choose_program_handler, F.data.startswith("program_select:"))
-    dp.callback_query.register(choose_duration_handler, OrderForm.choosing_duration, F.data.startswith("duration:"))
-    dp.callback_query.register(promo_callback_handler, F.data.startswith("promo:"))
-    dp.callback_query.register(delivery_time_handler, OrderForm.choosing_delivery_time, F.data.startswith("delivery_time:"))
-    dp.callback_query.register(payment_handler, OrderForm.choosing_payment, F.data.startswith("payment:"))
-    dp.callback_query.register(confirm_handler, OrderForm.confirming_order, F.data.startswith("confirm:"))
-    dp.callback_query.register(admin_callback_handler, F.data.startswith("admin:"))
-    # FIX: используем "setstatus:" вместо "status:" во избежание конфликтов
-    dp.callback_query.register(setstatus_callback_handler, F.data.startswith("setstatus:"))
-    dp.callback_query.register(review_callback_handler, F.data.startswith("review:"))
-
-    # ── FSM message handlers ───────────────────────────────────────────────
+    # ── FSM message handlers (до fallback!) ────────────────────────────────
     dp.message.register(promo_text_handler, OrderForm.entering_promo)
     dp.message.register(name_handler, OrderForm.entering_name)
     dp.message.register(phone_handler, OrderForm.entering_phone)
@@ -1883,11 +2229,42 @@ async def main():
     dp.message.register(order_detail_handler, Command("order"))
     dp.message.register(set_status_handler, Command("set_status"))
 
-    # ── Fallback (должен быть последним) ──────────────────────────────────
+    # ── Callback query handlers ────────────────────────────────────────────
+    dp.callback_query.register(program_view_handler, F.data.startswith("program_view:"))
+    dp.callback_query.register(programs_back_handler, F.data == "programs:back")
+    dp.callback_query.register(choose_program_handler, F.data.startswith("program_select:"))
+    dp.callback_query.register(
+        choose_duration_handler,
+        OrderForm.choosing_duration,
+        F.data.startswith("duration:"),
+    )
+    dp.callback_query.register(promo_callback_handler, F.data.startswith("promo:"))
+    dp.callback_query.register(
+        delivery_time_handler,
+        OrderForm.choosing_delivery_time,
+        F.data.startswith("dtime:"),
+    )
+    dp.callback_query.register(
+        payment_handler,
+        OrderForm.choosing_payment,
+        F.data.startswith("payment:"),
+    )
+    dp.callback_query.register(
+        confirm_handler,
+        OrderForm.confirming_order,
+        F.data.startswith("confirm:"),
+    )
+    dp.callback_query.register(admin_callback_handler, F.data.startswith("admin:"))
+    dp.callback_query.register(setstatus_callback_handler, F.data.startswith("ss:"))
+    # FIX: "rv:" вместо "review:" — короче и не конфликтует
+    dp.callback_query.register(review_callback_handler, F.data.startswith("rv:"))
+
+    # ── Fallback ───────────────────────────────────────────────────────────
     dp.message.register(fallback_handler)
 
     logger.info("Bot started. Admin ID: %d", ADMIN_TELEGRAM_ID)
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
